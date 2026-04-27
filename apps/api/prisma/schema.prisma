@@ -66,6 +66,53 @@ enum DealStatus {
   LOST
 }
 
+enum LeadStatus {
+  NEW
+  QUALIFIED
+  DISQUALIFIED
+  CONVERTED
+}
+
+enum EnrichmentStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+}
+
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  RUNNING
+  PAUSED
+  COMPLETED
+  CANCELLED
+}
+
+enum ProjectStatus {
+  PLANNED
+  ACTIVE
+  ON_HOLD
+  COMPLETED
+  CANCELLED
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  DONE
+  BLOCKED
+  CANCELLED
+}
+
+enum AIInsightType {
+  SUMMARY
+  NEXT_ACTION
+  RISK
+  OPPORTUNITY
+  ENRICHMENT
+}
+
 model Tenant {
   id        String    @id @default(cuid())
   name      String
@@ -74,14 +121,25 @@ model Tenant {
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
-  memberships   Membership[]
-  auditLogs     AuditLog[]
-  organizations Organization[]
-  people        Person[]
-  pipelines     Pipeline[]
-  stages        Stage[]
-  deals         Deal[]
-  activities    Activity[]
+  memberships      Membership[]
+  auditLogs        AuditLog[]
+  organizations    Organization[]
+  people           Person[]
+  pipelines        Pipeline[]
+  stages           Stage[]
+  deals            Deal[]
+  activities       Activity[]
+  emails           Email[]
+  products         Product[]
+  dealProducts     DealProduct[]
+  leads            Lead[]
+  forms            Form[]
+  campaigns        Campaign[]
+  campaignContacts CampaignContact[]
+  projects         Project[]
+  tasks            Task[]
+  projectTemplates ProjectTemplate[]
+  aiInsights       AIInsight[]
 
   @@index([deletedAt])
 }
@@ -123,6 +181,7 @@ model Membership {
 
   ownedDeals      Deal[]     @relation("DealOwner")
   ownedActivities Activity[] @relation("ActivityOwner")
+  ownedTasks      Task[]     @relation("TaskOwner")
 
   @@unique([tenantId, userId])
   @@unique([tenantId, id])
@@ -190,21 +249,26 @@ model AuditLog {
 }
 
 model Organization {
-  id        String    @id @default(cuid())
-  tenantId  String
-  name      String
-  website   String?
-  domain    String?
-  industry  String?
-  notes     String?
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  deletedAt DateTime?
+  id                  String                 @id @default(cuid())
+  tenantId            String
+  name                String
+  website             String?
+  domain              String?
+  industry            String?
+  notes               String?
+  enrichmentEmbedding Unsupported("vector")?
+  createdAt           DateTime               @default(now())
+  updatedAt           DateTime               @updatedAt
+  deletedAt           DateTime?
 
-  tenant     Tenant     @relation(fields: [tenantId], references: [id])
+  tenant     Tenant      @relation(fields: [tenantId], references: [id])
   people     Person[]
   deals      Deal[]
   activities Activity[]
+  emails     Email[]
+  leads      Lead[]
+  projects   Project[]
+  aiInsights AIInsight[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, domain])
@@ -229,10 +293,14 @@ model Person {
   updatedAt      DateTime  @updatedAt
   deletedAt      DateTime?
 
-  tenant       Tenant        @relation(fields: [tenantId], references: [id])
-  organization Organization? @relation(fields: [tenantId, organizationId], references: [tenantId, id])
-  deals        Deal[]
-  activities   Activity[]
+  tenant           Tenant            @relation(fields: [tenantId], references: [id])
+  organization     Organization?     @relation(fields: [tenantId, organizationId], references: [tenantId, id])
+  deals            Deal[]
+  activities       Activity[]
+  emails           Email[]
+  leads            Lead[]
+  campaignContacts CampaignContact[]
+  aiInsights       AIInsight[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, email])
@@ -308,6 +376,10 @@ model Deal {
   stage        Stage         @relation(fields: [tenantId, pipelineId, stageId], references: [tenantId, pipelineId, id])
   owner        Membership    @relation("DealOwner", fields: [tenantId, ownerId], references: [tenantId, id])
   activities   Activity[]
+  emails       Email[]
+  dealProducts DealProduct[]
+  projects     Project[]
+  aiInsights   AIInsight[]
 
   @@unique([tenantId, id])
   @@index([tenantId, deletedAt])
@@ -348,4 +420,285 @@ model Activity {
   @@index([tenantId, ownerId])
   @@index([tenantId, dueAt])
   @@index([tenantId, completedAt])
+}
+
+model Email {
+  id                  String    @id @default(cuid())
+  tenantId            String
+  organizationId      String?
+  personId            String?
+  dealId              String?
+  direction           String
+  fromAddress         String
+  toAddresses         String[]
+  ccAddresses         String[]
+  bccAddresses        String[]
+  subject             String?
+  bodyEncrypted       String
+  bodyPreview         String?   @db.VarChar(500)
+  gmailMessageId      String?
+  outlookMessageId    String?
+  gmailHistoryId      String?
+  gmailWatchExpiresAt DateTime?
+  sentAt              DateTime?
+  receivedAt          DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  deletedAt           DateTime?
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id])
+  organization Organization? @relation(fields: [tenantId, organizationId], references: [tenantId, id])
+  person       Person?       @relation(fields: [tenantId, personId], references: [tenantId, id])
+  deal         Deal?         @relation(fields: [tenantId, dealId], references: [tenantId, id])
+
+  @@unique([tenantId, gmailMessageId])
+  @@unique([tenantId, outlookMessageId])
+  @@index([tenantId, deletedAt])
+  @@index([tenantId, organizationId])
+  @@index([tenantId, personId])
+  @@index([tenantId, dealId])
+  @@index([tenantId, sentAt])
+  @@index([tenantId, receivedAt])
+}
+
+model Product {
+  id          String    @id @default(cuid())
+  tenantId    String
+  name        String
+  sku         String?
+  description String?
+  unitPrice   Decimal?
+  currency    String    @default("EUR")
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id])
+  dealProducts DealProduct[]
+
+  @@unique([tenantId, name])
+  @@unique([tenantId, id])
+  @@unique([tenantId, sku])
+  @@index([tenantId, deletedAt])
+  @@index([tenantId, isActive])
+}
+
+model DealProduct {
+  id         String   @id @default(cuid())
+  tenantId   String
+  dealId     String
+  productId  String
+  quantity   Decimal
+  unitPrice  Decimal
+  totalPrice Decimal
+  currency   String   @default("EUR")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id])
+  deal    Deal    @relation(fields: [tenantId, dealId], references: [tenantId, id])
+  product Product @relation(fields: [tenantId, productId], references: [tenantId, id])
+
+  @@unique([tenantId, dealId, productId])
+  @@index([tenantId, dealId])
+  @@index([tenantId, productId])
+}
+
+model Lead {
+  id               String           @id @default(cuid())
+  tenantId         String
+  formId           String?
+  organizationId   String?
+  personId         String?
+  source           String?
+  status           LeadStatus       @default(NEW)
+  enrichmentStatus EnrichmentStatus @default(PENDING)
+  rawPayload       Json?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  deletedAt        DateTime?
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id])
+  form         Form?         @relation(fields: [tenantId, formId], references: [tenantId, id])
+  organization Organization? @relation(fields: [tenantId, organizationId], references: [tenantId, id])
+  person       Person?       @relation(fields: [tenantId, personId], references: [tenantId, id])
+
+  @@index([tenantId, deletedAt])
+  @@index([tenantId, formId])
+  @@index([tenantId, status])
+  @@index([tenantId, enrichmentStatus])
+  @@index([tenantId, createdAt])
+}
+
+model Form {
+  id          String    @id @default(cuid())
+  tenantId    String
+  name        String
+  slug        String
+  description String?
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  leads  Lead[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, slug])
+  @@index([tenantId, deletedAt])
+  @@index([tenantId, isActive])
+}
+
+model Campaign {
+  id            String         @id @default(cuid())
+  tenantId      String
+  name          String
+  status        CampaignStatus @default(DRAFT)
+  subject       String?
+  bodyEncrypted String
+  bodyPreview   String?        @db.VarChar(500)
+  scheduledAt   DateTime?
+  startedAt     DateTime?
+  completedAt   DateTime?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  deletedAt     DateTime?
+
+  tenant           Tenant            @relation(fields: [tenantId], references: [id])
+  campaignContacts CampaignContact[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, name])
+  @@index([tenantId, deletedAt])
+  @@index([tenantId, status])
+  @@index([tenantId, scheduledAt])
+}
+
+/// Campaign membership and tracking metadata.
+/// Inserts must be consent-/opt-in-gated in service logic before any send or tracking flow.
+/// Tracking timestamps must comply with privacy/DSGVO requirements and avoid unnecessary sensitive raw data.
+model CampaignContact {
+  id             String    @id @default(cuid())
+  tenantId       String
+  campaignId     String
+  personId       String
+  /// Intentionally globally unique because it is a public tracking identifier used in links.
+  trackingToken  String    @unique
+  sentAt         DateTime?
+  openedAt       DateTime?
+  clickedAt      DateTime?
+  unsubscribedAt DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id])
+  campaign Campaign @relation(fields: [tenantId, campaignId], references: [tenantId, id])
+  person   Person   @relation(fields: [tenantId, personId], references: [tenantId, id])
+
+  @@unique([tenantId, campaignId, personId])
+  @@index([tenantId, campaignId])
+  @@index([tenantId, personId])
+  @@index([tenantId, sentAt])
+  @@index([tenantId, openedAt])
+}
+
+model Project {
+  id             String        @id @default(cuid())
+  tenantId       String
+  organizationId String?
+  dealId         String?
+  name           String
+  description    String?
+  status         ProjectStatus @default(PLANNED)
+  startsAt       DateTime?
+  endsAt         DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  deletedAt      DateTime?
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id])
+  organization Organization? @relation(fields: [tenantId, organizationId], references: [tenantId, id])
+  deal         Deal?         @relation(fields: [tenantId, dealId], references: [tenantId, id])
+  tasks        Task[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, deletedAt])
+  @@index([tenantId, organizationId])
+  @@index([tenantId, dealId])
+  @@index([tenantId, status])
+}
+
+model Task {
+  id          String     @id @default(cuid())
+  tenantId    String
+  projectId   String?
+  ownerId     String?
+  title       String
+  description String?
+  status      TaskStatus @default(TODO)
+  priority    Priority   @default(MEDIUM)
+  dueAt       DateTime?
+  completedAt DateTime?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  deletedAt   DateTime?
+
+  tenant  Tenant      @relation(fields: [tenantId], references: [id])
+  project Project?    @relation(fields: [tenantId, projectId], references: [tenantId, id])
+  owner   Membership? @relation("TaskOwner", fields: [tenantId, ownerId], references: [tenantId, id])
+
+  @@index([tenantId, deletedAt])
+  @@index([tenantId, projectId])
+  @@index([tenantId, ownerId])
+  @@index([tenantId, status])
+  @@index([tenantId, dueAt])
+}
+
+model ProjectTemplate {
+  id          String    @id @default(cuid())
+  tenantId    String
+  name        String
+  description String?
+  template    Json
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, name])
+  @@index([tenantId, deletedAt])
+  @@index([tenantId, isActive])
+}
+
+model AIInsight {
+  id             String        @id @default(cuid())
+  tenantId       String
+  organizationId String?
+  personId       String?
+  dealId         String?
+  type           AIInsightType
+  title          String
+  content        Json
+  confidence     Decimal?
+  validatedAt    DateTime?
+  dismissedAt    DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  deletedAt      DateTime?
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id])
+  organization Organization? @relation(fields: [tenantId, organizationId], references: [tenantId, id])
+  person       Person?       @relation(fields: [tenantId, personId], references: [tenantId, id])
+  deal         Deal?         @relation(fields: [tenantId, dealId], references: [tenantId, id])
+
+  @@index([tenantId, deletedAt])
+  @@index([tenantId, organizationId])
+  @@index([tenantId, personId])
+  @@index([tenantId, dealId])
+  @@index([tenantId, type])
+  @@index([tenantId, validatedAt])
 }
