@@ -2,7 +2,7 @@ name: infranex-crm
 
 services:
   postgres:
-    image: postgres:15.14-alpine
+    image: pgvector/pgvector:pg15
     container_name: infranex-postgres
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-infranex_dev}
