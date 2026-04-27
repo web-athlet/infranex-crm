@@ -2,17 +2,33 @@
 
 AI-native CRM monorepo scaffold.
 
+See [AGENTS.md](./AGENTS.md) for repository rules and [Session 0 Summary](./docs/sessions/session-0.md) for the scaffold baseline.
+
 ## Status
 
 Monorepo scaffold for the web app, API app, and local infrastructure.
 
-## Commands
+## Setup
+
+Install dependencies:
 
 ```bash
 npm install
+```
+
+Run baseline checks:
+
+```bash
 npm run lint
 npm run type-check
 npm run format:check
+```
+
+Build workspaces:
+
+```bash
+npm run build --workspace @infranex/web
+npm run build --workspace @infranex/api
 ```
 
 ## Workspace Layout
@@ -55,4 +71,10 @@ docker build -f apps/api/Dockerfile .
 docker build -f apps/web/Dockerfile .
 ```
 
+The Docker build context must be the repository root.
+
 Docker images use concrete Node 20 Alpine tags. They are not digest-pinned yet; pin digests later for stricter reproducibility.
+
+## CI
+
+GitHub Actions runs the baseline checks on push and pull requests using Node 20.19.0 and npm 11.8.0.
