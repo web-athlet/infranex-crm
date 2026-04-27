@@ -9,7 +9,8 @@
     "lint": "eslint \"src/**/*.ts\"",
     "type-check": "tsc --noEmit -p tsconfig.json",
     "prisma:generate": "prisma generate",
-    "prisma:seed": "prisma db seed"
+    "prisma:seed": "prisma db seed",
+    "prisma:seed:check": "tsc --noEmit --strict --target ES2022 --module CommonJS --moduleResolution Node --lib ES2022 --types node --esModuleInterop --skipLibCheck prisma/seed.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

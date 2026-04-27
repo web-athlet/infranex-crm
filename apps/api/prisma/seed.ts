@@ -27,6 +27,7 @@ const BASE_DATE = new Date('2026-01-15T09:00:00.000Z');
 
 type DemoUser = {
   email: string;
+  legacyEmail: string;
   name: string;
   role: MembershipRole;
 };
@@ -77,17 +78,20 @@ const stats: SeedStats = {
 
 const demoUsers: DemoUser[] = [
   {
-    email: 'admin@demo.de',
+    email: 'admin@example.test',
+    legacyEmail: 'admin@demo.de',
     name: 'Demo Admin',
     role: MembershipRole.ADMIN,
   },
   {
-    email: 'manager@demo.de',
+    email: 'manager@example.test',
+    legacyEmail: 'manager@demo.de',
     name: 'Demo Manager',
     role: MembershipRole.MANAGER,
   },
   {
-    email: 'sales@demo.de',
+    email: 'sales@example.test',
+    legacyEmail: 'sales@demo.de',
     name: 'Demo Sales',
     role: MembershipRole.SALES_REP,
   },
@@ -175,29 +179,80 @@ async function seedTenant() {
   });
 }
 
-async function seedUsersAndMemberships(tenantId: string) {
-  const passwordHash = await bcrypt.hash(DEMO_PASSWORD, 12);
+function assertSeedRecordTenant(
+  modelName: string,
+  id: string,
+  actualTenantId: string,
+  expectedTenantId: string,
+) {
+  if (actualTenantId !== expectedTenantId) {
+    throw new Error(
+      `Seed ${modelName} id collision across tenants: ${id} belongs to tenant ${actualTenantId}`,
+    );
+  }
+}
 
+async function seedUsersAndMemberships(tenantId: string) {
   const memberships = [];
 
   for (const user of demoUsers) {
-    const seededUser = await prisma.user.upsert({
-      where: {
-        email: user.email,
-      },
-      update: {
-        name: user.name,
-        passwordHash,
-        passwordChangedAt: DEMO_PASSWORD_CHANGED_AT,
-        deletedAt: null,
-      },
-      create: {
-        email: user.email,
-        name: user.name,
-        passwordHash,
-        passwordChangedAt: DEMO_PASSWORD_CHANGED_AT,
+    const existingSafeUser = await prisma.user.findUnique({
+      where: { email: user.email },
+      select: {
+        id: true,
+        passwordHash: true,
+        passwordChangedAt: true,
       },
     });
+
+    const existingLegacyUser = existingSafeUser
+      ? null
+      : await prisma.user.findUnique({
+          where: { email: user.legacyEmail },
+          select: {
+            id: true,
+            passwordHash: true,
+            passwordChangedAt: true,
+          },
+        });
+
+    const existingUser = existingSafeUser ?? existingLegacyUser;
+    const passwordMatches = existingUser
+      ? await bcrypt.compare(DEMO_PASSWORD, existingUser.passwordHash)
+      : false;
+    const shouldNormalizePasswordChangedAt =
+      passwordMatches &&
+      existingUser?.passwordChangedAt?.getTime() !== DEMO_PASSWORD_CHANGED_AT.getTime();
+
+    const seededUser = existingUser
+      ? await prisma.user.update({
+          where: {
+            id: existingUser.id,
+          },
+          data: {
+            email: user.email,
+            name: user.name,
+            deletedAt: null,
+            ...(passwordMatches
+              ? shouldNormalizePasswordChangedAt
+                ? {
+                    passwordChangedAt: DEMO_PASSWORD_CHANGED_AT,
+                  }
+                : {}
+              : {
+                  passwordHash: await bcrypt.hash(DEMO_PASSWORD, 12),
+                  passwordChangedAt: DEMO_PASSWORD_CHANGED_AT,
+                }),
+          },
+        })
+      : await prisma.user.create({
+          data: {
+            email: user.email,
+            name: user.name,
+            passwordHash: await bcrypt.hash(DEMO_PASSWORD, 12),
+            passwordChangedAt: DEMO_PASSWORD_CHANGED_AT,
+          },
+        });
 
     const membership = await prisma.membership.upsert({
       where: {
@@ -366,25 +421,43 @@ async function seedPeople(
   return people;
 }
 
-async function upsertDealByTitle(data: Prisma.DealUncheckedCreateInput) {
-  const existing = await prisma.deal.findFirst({
+async function upsertDealBySeedId(id: string, data: Omit<Prisma.DealUncheckedCreateInput, 'id'>) {
+  const existingById = await prisma.deal.findUnique({
+    where: { id },
+    select: { id: true, tenantId: true },
+  });
+
+  if (existingById) {
+    assertSeedRecordTenant('deal', id, existingById.tenantId, data.tenantId);
+
+    return prisma.deal.update({
+      where: { id },
+      data,
+    });
+  }
+
+  const existingByLegacyKey = await prisma.deal.findFirst({
     where: {
       tenantId: data.tenantId,
       title: data.title,
     },
+    orderBy: {
+      createdAt: 'asc',
+    },
   });
 
-  if (existing) {
+  if (existingByLegacyKey) {
     return prisma.deal.update({
-      where: {
-        id: existing.id,
-      },
+      where: { id: existingByLegacyKey.id },
       data,
     });
   }
 
   return prisma.deal.create({
-    data,
+    data: {
+      id,
+      ...data,
+    },
   });
 }
 
@@ -406,7 +479,7 @@ async function seedDeals(
     const owner = memberships[index % memberships.length];
     const status = index > 24 ? DealStatus.LOST : index > 20 ? DealStatus.WON : DealStatus.OPEN;
 
-    const deal = await upsertDealByTitle({
+    const deal = await upsertDealBySeedId(`seed_infranex_demo_deal_${number}`, {
       tenantId,
       organizationId: organization.id,
       personId: person.id,
@@ -433,25 +506,46 @@ async function seedDeals(
   return deals;
 }
 
-async function upsertActivityBySubject(data: Prisma.ActivityUncheckedCreateInput) {
-  const existing = await prisma.activity.findFirst({
+async function upsertActivityBySeedId(
+  id: string,
+  data: Omit<Prisma.ActivityUncheckedCreateInput, 'id'>,
+) {
+  const existingById = await prisma.activity.findUnique({
+    where: { id },
+    select: { id: true, tenantId: true },
+  });
+
+  if (existingById) {
+    assertSeedRecordTenant('activity', id, existingById.tenantId, data.tenantId);
+
+    return prisma.activity.update({
+      where: { id },
+      data,
+    });
+  }
+
+  const existingByLegacyKey = await prisma.activity.findFirst({
     where: {
       tenantId: data.tenantId,
       subject: data.subject,
     },
+    orderBy: {
+      createdAt: 'asc',
+    },
   });
 
-  if (existing) {
+  if (existingByLegacyKey) {
     return prisma.activity.update({
-      where: {
-        id: existing.id,
-      },
+      where: { id: existingByLegacyKey.id },
       data,
     });
   }
 
   return prisma.activity.create({
-    data,
+    data: {
+      id,
+      ...data,
+    },
   });
 }
 
@@ -478,7 +572,7 @@ async function seedActivities(
     const owner = memberships[index % memberships.length];
     const completedAt = index % 4 === 0 ? addDays(BASE_DATE, index) : null;
 
-    await upsertActivityBySubject({
+    await upsertActivityBySeedId(`seed_infranex_demo_activity_${number}`, {
       tenantId,
       organizationId: organization.id,
       personId: person.id,
@@ -575,25 +669,91 @@ async function seedDealProducts(
   }
 }
 
-async function upsertProjectByName(data: Prisma.ProjectUncheckedCreateInput) {
-  const existing = await prisma.project.findFirst({
+async function upsertProjectBySeedId(
+  id: string,
+  data: Omit<Prisma.ProjectUncheckedCreateInput, 'id'>,
+) {
+  const existingById = await prisma.project.findUnique({
+    where: { id },
+    select: { id: true, tenantId: true },
+  });
+
+  if (existingById) {
+    assertSeedRecordTenant('project', id, existingById.tenantId, data.tenantId);
+
+    return prisma.project.update({
+      where: { id },
+      data,
+    });
+  }
+
+  const existingByLegacyKey = await prisma.project.findFirst({
     where: {
       tenantId: data.tenantId,
       name: data.name,
     },
+    orderBy: {
+      createdAt: 'asc',
+    },
   });
 
-  if (existing) {
+  if (existingByLegacyKey) {
     return prisma.project.update({
-      where: {
-        id: existing.id,
-      },
+      where: { id: existingByLegacyKey.id },
       data,
     });
   }
 
   return prisma.project.create({
-    data,
+    data: {
+      id,
+      ...data,
+    },
+  });
+}
+
+async function upsertTaskBySeedId(
+  id: string,
+  legacyKey: {
+    tenantId: string;
+    projectId: string;
+    title: string;
+  },
+  data: Omit<Prisma.TaskUncheckedCreateInput, 'id'>,
+) {
+  const existingById = await prisma.task.findUnique({
+    where: { id },
+    select: { id: true, tenantId: true },
+  });
+
+  if (existingById) {
+    assertSeedRecordTenant('task', id, existingById.tenantId, data.tenantId);
+
+    return prisma.task.update({
+      where: { id },
+      data,
+    });
+  }
+
+  const existingByLegacyKey = await prisma.task.findFirst({
+    where: legacyKey,
+    orderBy: {
+      createdAt: 'asc',
+    },
+  });
+
+  if (existingByLegacyKey) {
+    return prisma.task.update({
+      where: { id: existingByLegacyKey.id },
+      data,
+    });
+  }
+
+  return prisma.task.create({
+    data: {
+      id,
+      ...data,
+    },
   });
 }
 
@@ -607,7 +767,7 @@ async function seedProjectsAndTasks(
 
   for (let index = 0; index < 3; index += 1) {
     const number = index + 1;
-    const project = await upsertProjectByName({
+    const project = await upsertProjectBySeedId(`seed_infranex_demo_project_${number}`, {
       tenantId,
       organizationId: organizations[index].id,
       dealId: deals[index].id,
@@ -625,15 +785,9 @@ async function seedProjectsAndTasks(
     for (let taskIndex = 0; taskIndex < 4; taskIndex += 1) {
       const owner = memberships[(index + taskIndex) % memberships.length];
       const title = `Demo Projekt ${number} Aufgabe ${taskIndex + 1}`;
-      const existingTask = await prisma.task.findFirst({
-        where: {
-          tenantId,
-          projectId: project.id,
-          title,
-        },
-      });
+      const taskId = `seed_infranex_demo_project_${number}_task_${taskIndex + 1}`;
 
-      const data: Prisma.TaskUncheckedCreateInput = {
+      const data: Omit<Prisma.TaskUncheckedCreateInput, 'id'> = {
         tenantId,
         projectId: project.id,
         ownerId: taskIndex === 3 ? null : owner.id,
@@ -648,18 +802,15 @@ async function seedProjectsAndTasks(
         deletedAt: null,
       };
 
-      if (existingTask) {
-        await prisma.task.update({
-          where: {
-            id: existingTask.id,
-          },
-          data,
-        });
-      } else {
-        await prisma.task.create({
-          data,
-        });
-      }
+      await upsertTaskBySeedId(
+        taskId,
+        {
+          tenantId,
+          projectId: project.id,
+          title,
+        },
+        data,
+      );
 
       stats.tasks += 1;
     }
@@ -711,6 +862,117 @@ async function seedProjectTemplate(tenantId: string) {
   stats.projectTemplates += 1;
 }
 
+async function upsertLeadBySeedId(id: string, data: Omit<Prisma.LeadUncheckedCreateInput, 'id'>) {
+  const existingById = await prisma.lead.findUnique({
+    where: { id },
+    select: { id: true, tenantId: true },
+  });
+
+  if (existingById) {
+    assertSeedRecordTenant('lead', id, existingById.tenantId, data.tenantId);
+
+    return prisma.lead.update({
+      where: { id },
+      data,
+    });
+  }
+
+  const existingByLegacyKey = await prisma.lead.findFirst({
+    where: {
+      tenantId: data.tenantId,
+      source: data.source,
+    },
+    orderBy: {
+      createdAt: 'asc',
+    },
+  });
+
+  if (existingByLegacyKey) {
+    return prisma.lead.update({
+      where: { id: existingByLegacyKey.id },
+      data,
+    });
+  }
+
+  return prisma.lead.create({
+    data: {
+      id,
+      ...data,
+    },
+  });
+}
+
+async function upsertAIInsightBySeedId(
+  id: string,
+  data: Omit<Prisma.AIInsightUncheckedCreateInput, 'id'>,
+) {
+  const existingById = await prisma.aIInsight.findUnique({
+    where: { id },
+    select: { id: true, tenantId: true },
+  });
+
+  if (existingById) {
+    assertSeedRecordTenant('AI insight', id, existingById.tenantId, data.tenantId);
+
+    return prisma.aIInsight.update({
+      where: { id },
+      data,
+    });
+  }
+
+  const existingByLegacyKey = await prisma.aIInsight.findFirst({
+    where: {
+      tenantId: data.tenantId,
+      type: data.type,
+      title: data.title,
+    },
+    orderBy: {
+      createdAt: 'asc',
+    },
+  });
+
+  if (existingByLegacyKey) {
+    return prisma.aIInsight.update({
+      where: { id: existingByLegacyKey.id },
+      data,
+    });
+  }
+
+  return prisma.aIInsight.create({
+    data: {
+      id,
+      ...data,
+    },
+  });
+}
+
+async function assertCampaignContactTokenAvailable(
+  trackingToken: string,
+  expected: {
+    tenantId: string;
+    campaignId: string;
+    personId: string;
+  },
+) {
+  const existing = await prisma.campaignContact.findUnique({
+    where: { trackingToken },
+    select: {
+      tenantId: true,
+      campaignId: true,
+      personId: true,
+    },
+  });
+
+  if (
+    existing &&
+    (existing.tenantId !== expected.tenantId ||
+      existing.campaignId !== expected.campaignId ||
+      existing.personId !== expected.personId)
+  ) {
+    throw new Error(`Seed tracking token collision: ${trackingToken}`);
+  }
+}
+
 async function seedFormsLeadsCampaignsAndInsights(
   tenantId: string,
   organizations: Awaited<ReturnType<typeof seedOrganizations>>,
@@ -742,15 +1004,10 @@ async function seedFormsLeadsCampaignsAndInsights(
   stats.forms += 1;
 
   for (let index = 0; index < 6; index += 1) {
-    const source = `demo-lead-${index + 1}`;
-    const existingLead = await prisma.lead.findFirst({
-      where: {
-        tenantId,
-        source,
-      },
-    });
+    const number = index + 1;
+    const source = `demo-lead-${number}`;
 
-    const data: Prisma.LeadUncheckedCreateInput = {
+    await upsertLeadBySeedId(`seed_infranex_demo_lead_${number}`, {
       tenantId,
       formId: form.id,
       organizationId: organizations[index % organizations.length].id,
@@ -770,20 +1027,7 @@ async function seedFormsLeadsCampaignsAndInsights(
         source,
       },
       deletedAt: null,
-    };
-
-    if (existingLead) {
-      await prisma.lead.update({
-        where: {
-          id: existingLead.id,
-        },
-        data,
-      });
-    } else {
-      await prisma.lead.create({
-        data,
-      });
-    }
+    });
 
     stats.leads += 1;
   }
@@ -817,14 +1061,25 @@ async function seedFormsLeadsCampaignsAndInsights(
   stats.campaigns += 1;
 
   for (let index = 0; index < 5; index += 1) {
+    const trackingToken = `infranex-demo-campaign-1-person-${index + 1}`;
+    const personId = people[index].id;
+
+    await assertCampaignContactTokenAvailable(trackingToken, {
+      tenantId,
+      campaignId: campaign.id,
+      personId,
+    });
+
     await prisma.campaignContact.upsert({
       where: {
-        trackingToken: `demo-tracking-token-${index + 1}`,
+        tenantId_campaignId_personId: {
+          tenantId,
+          campaignId: campaign.id,
+          personId,
+        },
       },
       update: {
-        tenantId,
-        campaignId: campaign.id,
-        personId: people[index].id,
+        trackingToken,
         sentAt: addDays(BASE_DATE, index),
         openedAt: index % 2 === 0 ? addDays(BASE_DATE, index + 1) : null,
         clickedAt: index === 2 ? addDays(BASE_DATE, index + 2) : null,
@@ -833,8 +1088,8 @@ async function seedFormsLeadsCampaignsAndInsights(
       create: {
         tenantId,
         campaignId: campaign.id,
-        personId: people[index].id,
-        trackingToken: `demo-tracking-token-${index + 1}`,
+        personId,
+        trackingToken,
         sentAt: addDays(BASE_DATE, index),
         openedAt: index % 2 === 0 ? addDays(BASE_DATE, index + 1) : null,
         clickedAt: index === 2 ? addDays(BASE_DATE, index + 2) : null,
@@ -853,43 +1108,24 @@ async function seedFormsLeadsCampaignsAndInsights(
       AIInsightType.OPPORTUNITY,
       AIInsightType.ENRICHMENT,
     ][index];
-    const title = `Demo AI Insight ${index + 1}`;
-    const existingInsight = await prisma.aIInsight.findFirst({
-      where: {
-        tenantId,
-        type,
-        title,
-      },
-    });
-    const data: Prisma.AIInsightUncheckedCreateInput = {
+    const number = index + 1;
+
+    await upsertAIInsightBySeedId(`seed_infranex_demo_ai_insight_${number}`, {
       tenantId,
       organizationId: organizations[index % organizations.length].id,
       personId: people[index % people.length].id,
       dealId: deals[index % deals.length].id,
       type,
-      title,
+      title: `Demo AI Insight ${number}`,
       content: {
         demo: true,
-        summary: `Deterministischer Demo Insight ${index + 1}.`,
+        summary: `Deterministischer Demo Insight ${number}.`,
       },
       confidence: decimal(`0.${7 + index}`),
       validatedAt: index % 2 === 0 ? addDays(BASE_DATE, index) : null,
       dismissedAt: null,
       deletedAt: null,
-    };
-
-    if (existingInsight) {
-      await prisma.aIInsight.update({
-        where: {
-          id: existingInsight.id,
-        },
-        data,
-      });
-    } else {
-      await prisma.aIInsight.create({
-        data,
-      });
-    }
+    });
 
     stats.aiInsights += 1;
   }
