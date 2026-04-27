@@ -45,6 +45,27 @@ enum TokenRevocationReason {
   ADMIN_REVOKED
 }
 
+enum ActivityType {
+  CALL
+  EMAIL
+  MEETING
+  TASK
+  NOTE
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum DealStatus {
+  OPEN
+  WON
+  LOST
+}
+
 model Tenant {
   id        String    @id @default(cuid())
   name      String
@@ -53,8 +74,14 @@ model Tenant {
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
-  memberships Membership[]
-  auditLogs   AuditLog[]
+  memberships   Membership[]
+  auditLogs     AuditLog[]
+  organizations Organization[]
+  people        Person[]
+  pipelines     Pipeline[]
+  stages        Stage[]
+  deals         Deal[]
+  activities    Activity[]
 
   @@index([deletedAt])
 }
@@ -94,7 +121,11 @@ model Membership {
   tenant Tenant @relation(fields: [tenantId], references: [id])
   user   User   @relation(fields: [userId], references: [id])
 
+  ownedDeals      Deal[]     @relation("DealOwner")
+  ownedActivities Activity[] @relation("ActivityOwner")
+
   @@unique([tenantId, userId])
+  @@unique([tenantId, id])
   @@index([tenantId, deletedAt])
   @@index([userId])
   @@index([tenantId, role])
@@ -156,4 +187,165 @@ model AuditLog {
   @@index([actorUserId, createdAt])
   @@index([entityType, entityId])
   @@index([action, createdAt])
+}
+
+model Organization {
+  id        String    @id @default(cuid())
+  tenantId  String
+  name      String
+  website   String?
+  domain    String?
+  industry  String?
+  notes     String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  tenant     Tenant     @relation(fields: [tenantId], references: [id])
+  people     Person[]
+  deals      Deal[]
+  activities Activity[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, domain])
+  @@index([tenantId, deletedAt])
+  @@index([tenantId, name])
+}
+
+model Person {
+  id             String    @id @default(cuid())
+  tenantId       String
+  organizationId String?
+  firstName      String
+  lastName       String
+  email          String?
+  phone          String?
+  title          String?
+  notes          String?
+  optIn          Boolean   @default(false)
+  optInSource    String?
+  optInAt        DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id])
+  organization Organization? @relation(fields: [tenantId, organizationId], references: [tenantId, id])
+  deals        Deal[]
+  activities   Activity[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, email])
+  @@index([tenantId, deletedAt])
+  @@index([tenantId, organizationId])
+}
+
+model Pipeline {
+  id        String    @id @default(cuid())
+  tenantId  String
+  name      String
+  isDefault Boolean   @default(false)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  tenant Tenant  @relation(fields: [tenantId], references: [id])
+  stages Stage[]
+  deals  Deal[]
+
+  @@unique([tenantId, name])
+  @@unique([tenantId, id])
+  @@index([tenantId, deletedAt])
+}
+
+model Stage {
+  id          String    @id @default(cuid())
+  tenantId    String
+  pipelineId  String
+  name        String
+  position    Int
+  probability Int?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id])
+  pipeline Pipeline @relation(fields: [tenantId, pipelineId], references: [tenantId, id])
+  deals    Deal[]
+
+  @@unique([tenantId, pipelineId, id])
+  @@unique([tenantId, pipelineId, name])
+  @@unique([tenantId, pipelineId, position])
+  @@index([tenantId, deletedAt])
+  @@index([tenantId, pipelineId])
+}
+
+model Deal {
+  id                   String     @id @default(cuid())
+  tenantId             String
+  organizationId       String?
+  personId             String?
+  pipelineId           String
+  stageId              String
+  ownerId              String
+  title                String
+  description          String?
+  value                Decimal?
+  currency             String     @default("EUR")
+  status               DealStatus @default(OPEN)
+  expectedCloseAt      DateTime?
+  closedAt             DateTime?
+  lostReason           String?
+  ghostingSnoozedUntil DateTime?
+  createdAt            DateTime   @default(now())
+  updatedAt            DateTime   @updatedAt
+  deletedAt            DateTime?
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id])
+  organization Organization? @relation(fields: [tenantId, organizationId], references: [tenantId, id])
+  person       Person?       @relation(fields: [tenantId, personId], references: [tenantId, id])
+  pipeline     Pipeline      @relation(fields: [tenantId, pipelineId], references: [tenantId, id])
+  stage        Stage         @relation(fields: [tenantId, pipelineId, stageId], references: [tenantId, pipelineId, id])
+  owner        Membership    @relation("DealOwner", fields: [tenantId, ownerId], references: [tenantId, id])
+  activities   Activity[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, deletedAt])
+  @@index([tenantId, pipelineId])
+  @@index([tenantId, stageId])
+  @@index([tenantId, ownerId])
+  @@index([tenantId, status])
+  @@index([tenantId, expectedCloseAt])
+}
+
+model Activity {
+  id             String       @id @default(cuid())
+  tenantId       String
+  organizationId String?
+  personId       String?
+  dealId         String?
+  ownerId        String?
+  type           ActivityType
+  priority       Priority     @default(MEDIUM)
+  subject        String
+  body           String?
+  dueAt          DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  deletedAt      DateTime?
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id])
+  organization Organization? @relation(fields: [tenantId, organizationId], references: [tenantId, id])
+  person       Person?       @relation(fields: [tenantId, personId], references: [tenantId, id])
+  deal         Deal?         @relation(fields: [tenantId, dealId], references: [tenantId, id])
+  owner        Membership?   @relation("ActivityOwner", fields: [tenantId, ownerId], references: [tenantId, id])
+
+  @@index([tenantId, deletedAt])
+  @@index([tenantId, organizationId])
+  @@index([tenantId, personId])
+  @@index([tenantId, dealId])
+  @@index([tenantId, ownerId])
+  @@index([tenantId, dueAt])
+  @@index([tenantId, completedAt])
 }
