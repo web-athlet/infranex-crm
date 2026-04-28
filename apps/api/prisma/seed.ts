@@ -221,7 +221,6 @@ async function seedUsersAndMemberships(tenantId: string) {
       ? await bcrypt.compare(DEMO_PASSWORD, existingUser.passwordHash)
       : false;
     const shouldNormalizePasswordChangedAt =
-      passwordMatches &&
       existingUser?.passwordChangedAt?.getTime() !== DEMO_PASSWORD_CHANGED_AT.getTime();
 
     const seededUser = existingUser

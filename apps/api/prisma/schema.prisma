@@ -17,6 +17,12 @@ enum MembershipRole {
   MEMBER
 }
 
+enum PlatformRole {
+  PLATFORM_ADMIN
+  SUPPORT
+  USER
+}
+
 enum AuditAction {
   CREATE
   UPDATE
@@ -145,19 +151,23 @@ model Tenant {
 }
 
 model User {
-  id                String    @id @default(cuid())
-  email             String    @unique
+  id                String       @id @default(cuid())
+  email             String       @unique
   passwordHash      String
   name              String?
   passwordChangedAt DateTime?
+  twoFactorSecret   String?
+  twoFactorEnabled  Boolean      @default(false)
+  platformRole      PlatformRole @default(USER)
   lastLoginAt       DateTime?
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
   deletedAt         DateTime?
 
   memberships    Membership[]
   refreshTokens  RefreshToken[]
   passwordResets PasswordReset[]
+  oauthAccounts  OAuthAccount[]
   auditLogs      AuditLog[]      @relation("AuditLogActor")
 
   @@index([email])
@@ -192,18 +202,21 @@ model Membership {
 }
 
 model RefreshToken {
-  id               String                 @id @default(cuid())
-  userId           String
-  tokenHash        String
-  revokedAt        DateTime?
-  revocationReason TokenRevocationReason?
-  expiresAt        DateTime
-  createdAt        DateTime               @default(now())
-  updatedAt        DateTime               @updatedAt
+  id                String                 @id @default(cuid())
+  userId            String
+  tokenHash         String
+  familyId          String
+  revokedAt         DateTime?
+  revocationReason  TokenRevocationReason?
+  expiresAt         DateTime
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+  replacedByTokenId String?
 
   user User @relation(fields: [userId], references: [id])
 
   @@index([userId])
+  @@index([familyId])
   @@index([tokenHash])
   @@index([expiresAt])
   @@index([revokedAt])
@@ -224,6 +237,24 @@ model PasswordReset {
   @@index([tokenHash])
   @@index([expiresAt])
   @@index([usedAt])
+}
+
+model OAuthAccount {
+  id                    String    @id @default(cuid())
+  userId                String
+  provider              String
+  providerAccountId     String
+  encryptedAccessToken  String
+  encryptedRefreshToken String?
+  expiresAt             DateTime?
+  scopes                String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
 }
 
 model AuditLog {
