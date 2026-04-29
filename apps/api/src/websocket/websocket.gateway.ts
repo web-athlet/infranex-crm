@@ -78,8 +78,7 @@ export class WebsocketGateway implements OnGatewayConnection, OnGatewayDisconnec
     try {
       const auth = await this.socketAuthService.verifyHandshakeToken(token);
       client.data.auth = auth;
-      await client.join(this.tenantRoom(auth.tenantId));
-      await client.join(this.userRoom(auth.tenantId, auth.userId));
+      await client.join(this.userRoom(auth.userId));
     } catch {
       client.disconnect(true);
     }
@@ -89,19 +88,22 @@ export class WebsocketGateway implements OnGatewayConnection, OnGatewayDisconnec
     return undefined;
   }
 
-  emitToUser(tenantId: string, userId: string, event: string, data: unknown) {
-    this.server.to(this.userRoom(tenantId, userId)).emit(event, data);
+  emitToUser(_tenantId: string, _userId: string, _event: string, _data: unknown) {
+    // Tenant-scoped user delivery requires server-derived membership before tenant rooms are joined.
+    return false;
   }
 
-  emitToTenant(tenantId: string, event: string, data: unknown) {
-    this.server.to(this.tenantRoom(tenantId)).emit(event, data);
+  emitToTenant(_tenantId: string, _event: string, _data: unknown) {
+    // Tenant-wide delivery requires server-derived membership before tenant rooms are joined.
+    return false;
   }
 
-  private userRoom(tenantId: string, userId: string) {
-    return `tenant:${tenantId}:user:${userId}`;
+  emitToGlobalUser(userId: string, event: string, data: unknown) {
+    this.server.to(this.userRoom(userId)).emit(event, data);
+    return true;
   }
 
-  private tenantRoom(tenantId: string) {
-    return `tenant:${tenantId}`;
+  private userRoom(userId: string) {
+    return `user:${userId}`;
   }
 }
