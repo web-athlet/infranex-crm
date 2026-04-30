@@ -81,7 +81,7 @@ export class RolesGuard implements CanActivate {
       throw new ForbiddenException('Tenant role is required');
     }
 
-    // TODO: Populate tenantContext only from a server-side tenant resolver before using this guard.
+    // TODO: Register/use this guard only after a trusted server-side guard or interceptor populates tenantContext.
     if (!hasTenantContext(request.tenantContext)) {
       throw new ForbiddenException('Tenant context is required');
     }
