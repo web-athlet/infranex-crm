@@ -14,6 +14,7 @@ enum MembershipRole {
   ADMIN
   MANAGER
   SALES_REP
+  READ_ONLY
   MEMBER
 }
 

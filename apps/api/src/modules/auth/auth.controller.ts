@@ -1,6 +1,7 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Post, Res, UseGuards } from '@nestjs/common';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 
+import { AUTH_THROTTLE_LIMITS } from './auth-throttle.config';
 import {
   AccessTokenResponse,
   AuthenticatedAuthUser,
@@ -34,7 +35,7 @@ export class AuthController {
 
   @Post('register')
   @UseGuards(ThrottlerGuard)
-  @Throttle({ default: { limit: 10, ttl: 900000 } })
+  @Throttle({ default: AUTH_THROTTLE_LIMITS.register })
   async register(@Body() dto: RegisterDto): Promise<SafeUserPayload> {
     return this.authService.register(dto);
   }
@@ -42,7 +43,7 @@ export class AuthController {
   @Post('login')
   @HttpCode(HttpStatus.OK)
   @UseGuards(ThrottlerGuard)
-  @Throttle({ default: { limit: 10, ttl: 900000 } })
+  @Throttle({ default: AUTH_THROTTLE_LIMITS.login })
   async login(
     @Body() dto: LoginDto,
     @Res({ passthrough: true }) response: CookieResponse,
@@ -59,7 +60,7 @@ export class AuthController {
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   @UseGuards(ThrottlerGuard, JwtRefreshGuard)
-  @Throttle({ default: { limit: 30, ttl: 900000 } })
+  @Throttle({ default: AUTH_THROTTLE_LIMITS.refresh })
   async refresh(
     @CurrentUser() user: AuthenticatedAuthUser,
     @CurrentRefreshToken() refreshToken: string,

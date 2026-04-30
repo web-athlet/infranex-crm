@@ -6,7 +6,13 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { PlatformRole, Prisma, PrismaClient, TokenRevocationReason } from '@prisma/client';
+import {
+  MembershipRole,
+  PlatformRole,
+  Prisma,
+  PrismaClient,
+  TokenRevocationReason,
+} from '@prisma/client';
 import bcrypt from 'bcrypt';
 import { randomBytes, randomUUID } from 'crypto';
 
@@ -331,6 +337,31 @@ export class AuthService implements OnModuleDestroy {
 
   async validateAccessPayload(payload: JwtPayload): Promise<AuthenticatedAuthUser> {
     return this.validateAuthenticatedPayload(payload);
+  }
+
+  async getActiveTenantMembershipRole(
+    userId: string,
+    tenantId: string,
+  ): Promise<MembershipRole | null> {
+    const membership = await this.prisma.membership.findFirst({
+      where: {
+        userId,
+        tenantId,
+        isActive: true,
+        deletedAt: null,
+        tenant: {
+          deletedAt: null,
+        },
+        user: {
+          deletedAt: null,
+        },
+      },
+      select: {
+        role: true,
+      },
+    });
+
+    return membership?.role ?? null;
   }
 
   getRefreshTokenFromCookieHeader(cookieHeader: string | string[] | undefined): string | null {
