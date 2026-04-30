@@ -11,8 +11,11 @@ import {
   SafeUserPayload,
 } from './auth.service';
 import { CurrentRefreshToken, CurrentUser } from './decorators/current-user.decorator';
+import { ChangePasswordDto } from './dto/change-password.dto';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { JwtRefreshGuard } from './guards/jwt-refresh.guard';
 
@@ -26,6 +29,10 @@ type LoginResponse = AccessTokenResponse & {
 };
 
 type LogoutResponse = {
+  success: true;
+};
+
+type SuccessResponse = {
   success: true;
 };
 
@@ -57,6 +64,26 @@ export class AuthController {
     };
   }
 
+  @Post('forgot-password')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ default: AUTH_THROTTLE_LIMITS.forgotPassword })
+  async forgotPassword(@Body() dto: ForgotPasswordDto): Promise<SuccessResponse> {
+    await this.authService.forgotPassword(dto);
+
+    return { success: true };
+  }
+
+  @Post('reset-password')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ default: AUTH_THROTTLE_LIMITS.resetPassword })
+  async resetPassword(@Body() dto: ResetPasswordDto): Promise<SuccessResponse> {
+    await this.authService.resetPassword(dto);
+
+    return { success: true };
+  }
+
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   @UseGuards(ThrottlerGuard, JwtRefreshGuard)
@@ -72,6 +99,21 @@ export class AuthController {
     return {
       accessToken: result.accessToken,
     };
+  }
+
+  @Post('change-password')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(ThrottlerGuard, JwtAuthGuard)
+  @Throttle({ default: AUTH_THROTTLE_LIMITS.changePassword })
+  async changePassword(
+    @CurrentUser() user: AuthenticatedAuthUser,
+    @Body() dto: ChangePasswordDto,
+    @Res({ passthrough: true }) response: CookieResponse,
+  ): Promise<AccessTokenResponse> {
+    const result = await this.authService.changePassword(user, dto);
+    this.clearRefreshCookie(response);
+
+    return result;
   }
 
   @Post('logout')

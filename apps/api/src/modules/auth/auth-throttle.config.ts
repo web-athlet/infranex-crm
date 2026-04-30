@@ -17,6 +17,18 @@ export const AUTH_THROTTLE_LIMITS = {
     limit: 30,
     ttl: AUTH_THROTTLE_TTL_MS,
   },
+  forgotPassword: {
+    limit: 10,
+    ttl: AUTH_THROTTLE_TTL_MS,
+  },
+  resetPassword: {
+    limit: 10,
+    ttl: AUTH_THROTTLE_TTL_MS,
+  },
+  changePassword: {
+    limit: 10,
+    ttl: AUTH_THROTTLE_TTL_MS,
+  },
   twoFactorValidate: {
     limit: 10,
     ttl: AUTH_THROTTLE_TTL_MS,
