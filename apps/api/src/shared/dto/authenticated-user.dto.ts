@@ -1,4 +1,5 @@
 export type AuthenticatedUser = {
   userId: string;
-  tenantId: string;
+  pwChangedAt: string;
+  platformRole?: string;
 };
