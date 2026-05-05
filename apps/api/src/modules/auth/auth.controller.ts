@@ -1,4 +1,15 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Post, Res, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Headers,
+  HttpCode,
+  HttpStatus,
+  Post,
+  Res,
+  UnauthorizedException,
+  UseGuards,
+} from '@nestjs/common';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 
 import { AUTH_THROTTLE_LIMITS } from './auth-throttle.config';
@@ -6,9 +17,15 @@ import {
   AccessTokenResponse,
   AuthenticatedAuthUser,
   AuthService,
+  CompletedLoginResult,
+  LoginResult,
   REFRESH_TOKEN_COOKIE_NAME,
   RefreshCookieOptions,
   SafeUserPayload,
+  TwoFactorLoginChallengeResponse,
+  TwoFactorSetupRequiredResponse,
+  TwoFactorSetupResponse,
+  TwoFactorVerifyResponse,
 } from './auth.service';
 import { CurrentRefreshToken, CurrentUser } from './decorators/current-user.decorator';
 import { ChangePasswordDto } from './dto/change-password.dto';
@@ -16,6 +33,10 @@ import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { TwoFactorDisableDto } from './dto/two-factor-disable.dto';
+import { TwoFactorGenerateDto } from './dto/two-factor-generate.dto';
+import { TwoFactorValidateDto } from './dto/two-factor-validate.dto';
+import { TwoFactorVerifyDto } from './dto/two-factor-verify.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { JwtRefreshGuard } from './guards/jwt-refresh.guard';
 
@@ -27,6 +48,11 @@ type CookieResponse = {
 type LoginResponse = AccessTokenResponse & {
   user: SafeUserPayload;
 };
+
+type LoginControllerResponse =
+  | LoginResponse
+  | TwoFactorLoginChallengeResponse
+  | TwoFactorSetupRequiredResponse;
 
 type LogoutResponse = {
   success: true;
@@ -54,14 +80,72 @@ export class AuthController {
   async login(
     @Body() dto: LoginDto,
     @Res({ passthrough: true }) response: CookieResponse,
-  ): Promise<LoginResponse> {
+  ): Promise<LoginControllerResponse> {
     const result = await this.authService.login(dto);
+
+    if (!this.isCompletedLoginResult(result)) {
+      return result;
+    }
+
     this.setRefreshCookie(response, result.refreshToken);
 
     return {
       accessToken: result.accessToken,
       user: result.user,
     };
+  }
+
+  @Post('2fa/generate')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ default: AUTH_THROTTLE_LIMITS.twoFactorGenerate })
+  async generateTwoFactorSetup(
+    @Body() dto: TwoFactorGenerateDto,
+    @Headers('authorization') authorization: string | undefined,
+  ): Promise<TwoFactorSetupResponse> {
+    return this.authService.generateTwoFactorSetup(authorization, dto);
+  }
+
+  @Post('2fa/verify')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ default: AUTH_THROTTLE_LIMITS.twoFactorVerify })
+  async verifyTwoFactorSetup(
+    @Body() dto: TwoFactorVerifyDto,
+    @Headers('authorization') authorization: string | undefined,
+  ): Promise<TwoFactorVerifyResponse> {
+    return this.authService.verifyTwoFactorSetup(authorization, dto);
+  }
+
+  @Post('2fa/validate')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ default: AUTH_THROTTLE_LIMITS.twoFactorValidate })
+  async validateTwoFactorLogin(
+    @Body() dto: TwoFactorValidateDto,
+    @Res({ passthrough: true }) response: CookieResponse,
+  ): Promise<AccessTokenResponse> {
+    const result = await this.authService.validateTwoFactorLogin(dto);
+    this.setRefreshCookie(response, result.refreshToken);
+
+    return {
+      accessToken: result.accessToken,
+    };
+  }
+
+  @Post('2fa/disable')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(ThrottlerGuard, JwtAuthGuard)
+  @Throttle({ default: AUTH_THROTTLE_LIMITS.twoFactorDisable })
+  async disableTwoFactor(
+    @CurrentUser() user: AuthenticatedAuthUser,
+    @Body() dto: TwoFactorDisableDto,
+    @Res({ passthrough: true }) response: CookieResponse,
+  ): Promise<SuccessResponse> {
+    await this.authService.disableTwoFactor(user, dto);
+    this.clearRefreshCookie(response);
+
+    return { success: true };
   }
 
   @Post('forgot-password')
@@ -93,7 +177,18 @@ export class AuthController {
     @CurrentRefreshToken() refreshToken: string,
     @Res({ passthrough: true }) response: CookieResponse,
   ): Promise<AccessTokenResponse> {
-    const result = await this.authService.refresh(user, refreshToken);
+    let result: CompletedLoginResult;
+
+    try {
+      result = await this.authService.refresh(user, refreshToken);
+    } catch (error: unknown) {
+      if (error instanceof UnauthorizedException) {
+        this.clearRefreshCookie(response);
+      }
+
+      throw error;
+    }
+
     this.setRefreshCookie(response, result.refreshToken);
 
     return {
@@ -162,5 +257,9 @@ export class AuthController {
       REFRESH_TOKEN_COOKIE_NAME,
       this.authService.getClearRefreshCookieOptions(),
     );
+  }
+
+  private isCompletedLoginResult(result: LoginResult): result is CompletedLoginResult {
+    return 'refreshToken' in result;
   }
 }

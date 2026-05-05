@@ -159,6 +159,10 @@ model User {
   passwordChangedAt DateTime?
   twoFactorSecret   String?
   twoFactorEnabled  Boolean      @default(false)
+  twoFactorSecretEncrypted  String?
+  twoFactorEnabledAt        DateTime?
+  twoFactorBackupCodesHash  Json?
+  twoFactorLastValidatedAt  DateTime?
   platformRole      PlatformRole @default(USER)
   lastLoginAt       DateTime?
   createdAt         DateTime     @default(now())
@@ -170,10 +174,28 @@ model User {
   refreshTokenFamilies RefreshTokenFamily[]
   passwordResets       PasswordReset[]
   oauthAccounts        OAuthAccount[]
+  twoFactorChallenges  TwoFactorChallenge[]
   auditLogs            AuditLog[]           @relation("AuditLogActor")
 
   @@index([email])
   @@index([deletedAt])
+}
+
+model TwoFactorChallenge {
+  id        String    @id @default(cuid())
+  userId    String
+  purpose   String
+  nonceHash String
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([purpose])
+  @@index([expiresAt])
+  @@index([usedAt])
 }
 
 model Membership {
@@ -226,12 +248,13 @@ model RefreshToken {
 }
 
 model RefreshTokenFamily {
-  id            String    @id
-  userId        String
-  compromisedAt DateTime?
-  invalidatedAt DateTime?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  id                      String    @id
+  userId                  String
+  compromisedAt           DateTime?
+  invalidatedAt           DateTime?
+  secondFactorSatisfiedAt DateTime?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
 
   user          User           @relation(fields: [userId], references: [id])
   refreshTokens RefreshToken[]
@@ -239,6 +262,7 @@ model RefreshTokenFamily {
   @@index([userId])
   @@index([compromisedAt])
   @@index([invalidatedAt])
+  @@index([secondFactorSatisfiedAt])
 }
 
 model PasswordReset {

@@ -29,7 +29,19 @@ export const AUTH_THROTTLE_LIMITS = {
     limit: 10,
     ttl: AUTH_THROTTLE_TTL_MS,
   },
+  twoFactorGenerate: {
+    limit: 10,
+    ttl: AUTH_THROTTLE_TTL_MS,
+  },
+  twoFactorVerify: {
+    limit: 10,
+    ttl: AUTH_THROTTLE_TTL_MS,
+  },
   twoFactorValidate: {
+    limit: 10,
+    ttl: AUTH_THROTTLE_TTL_MS,
+  },
+  twoFactorDisable: {
     limit: 10,
     ttl: AUTH_THROTTLE_TTL_MS,
   },

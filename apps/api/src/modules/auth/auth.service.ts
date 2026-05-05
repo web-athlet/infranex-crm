@@ -3,6 +3,7 @@ import {
   ConflictException,
   Injectable,
   OnModuleDestroy,
+  OnModuleInit,
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
@@ -14,7 +15,9 @@ import {
   TokenRevocationReason,
 } from '@prisma/client';
 import bcrypt from 'bcrypt';
-import { randomBytes, randomUUID } from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
+import { generateSecret, generateURI, verify } from 'otplib';
+import QRCode from 'qrcode';
 
 import { getJwtAccessSecret } from './auth.config';
 import { CryptoService } from './crypto.service';
@@ -23,6 +26,10 @@ import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { TwoFactorDisableDto } from './dto/two-factor-disable.dto';
+import { TwoFactorGenerateDto } from './dto/two-factor-generate.dto';
+import { TwoFactorValidateDto } from './dto/two-factor-validate.dto';
+import { TwoFactorVerifyDto } from './dto/two-factor-verify.dto';
 import { MailService } from './mail.service';
 import { isBcryptPasswordInputLengthValid } from './password.util';
 
@@ -36,6 +43,16 @@ const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000;
 const PASSWORD_RESET_SELECTOR_BYTES = 16;
 const PASSWORD_RESET_VERIFIER_BYTES = 32;
 const FORGOT_PASSWORD_MIN_RESPONSE_MS = 400;
+const TOTP_ISSUER = 'Infranex CRM';
+const TOTP_DIGITS = 6;
+const TOTP_STEP_SECONDS = 30;
+const TOTP_WINDOW = 1;
+const TWO_FACTOR_CHALLENGE_EXPIRES_IN = '5m';
+const TWO_FACTOR_CHALLENGE_TTL_MS = 5 * 60 * 1000;
+const TWO_FACTOR_BACKUP_CODE_COUNT = 10;
+const TWO_FACTOR_BACKUP_CODE_BYTES = 10;
+const LEGACY_TWO_FACTOR_UPGRADE_BATCH_SIZE = 100;
+const TWO_FACTOR_INVALID_MESSAGE = 'Invalid two-factor authentication code';
 
 export const REFRESH_TOKEN_COOKIE_NAME = 'infranex_refresh_token';
 
@@ -44,6 +61,22 @@ type JwtPayload = {
   pwChangedAt?: unknown;
   platformRole?: unknown;
 };
+
+type TwoFactorChallengeJwtPayload = {
+  sub?: unknown;
+  pwChangedAt?: unknown;
+  purpose?: unknown;
+  nonce?: unknown;
+};
+
+type VerifiedTwoFactorChallengeJwtPayload = {
+  sub: string;
+  pwChangedAt: string;
+  purpose: TwoFactorChallengePurpose;
+  nonce: string;
+};
+
+type TwoFactorChallengePurpose = '2fa' | '2fa_setup';
 
 type SafeUserSource = {
   id: string;
@@ -68,9 +101,38 @@ export type AccessTokenResponse = {
   accessToken: string;
 };
 
-export type LoginResult = AccessTokenResponse & {
+export type CompletedLoginResult = AccessTokenResponse & {
   refreshToken: string;
   user: SafeUserPayload;
+};
+
+export type TwoFactorLoginChallengeResponse = {
+  requiresTwoFactor: true;
+  challengeToken: string;
+};
+
+export type TwoFactorSetupRequiredResponse = {
+  requiresTwoFactorSetup: true;
+  setupToken: string;
+};
+
+export type LoginResult =
+  | CompletedLoginResult
+  | TwoFactorLoginChallengeResponse
+  | TwoFactorSetupRequiredResponse;
+
+export type TwoFactorSetupResponse = {
+  qrCode: string;
+  manualEntryKey: string;
+};
+
+export type TwoFactorVerifyResponse = {
+  success: true;
+  backupCodes: string[];
+};
+
+export type TwoFactorValidateResult = AccessTokenResponse & {
+  refreshToken: string;
 };
 
 export type RefreshCookieOptions = {
@@ -125,6 +187,33 @@ type RefreshTokenMaterial = {
   tokenHash: string;
   expiresAt: Date;
 };
+
+type RefreshTokenFamilyCreateOptions = {
+  secondFactorSatisfiedAt?: Date | null;
+};
+
+type TwoFactorUserState = SafeUserSource & {
+  passwordChangedAt: Date | null;
+  twoFactorEnabled: boolean;
+  twoFactorSecret: string | null;
+  twoFactorSecretEncrypted: string | null;
+  twoFactorBackupCodesHash: Prisma.JsonValue | null;
+  deletedAt: Date | null;
+};
+
+type TwoFactorSetupIdentity = {
+  user: AuthenticatedAuthUser;
+  setupTokenPayload: VerifiedTwoFactorChallengeJwtPayload | null;
+};
+
+type SecondFactorVerificationResult =
+  | {
+      valid: true;
+      remainingBackupCodeHashes: string[] | null;
+    }
+  | {
+      valid: false;
+    };
 
 function isString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
@@ -199,6 +288,46 @@ function parsePasswordResetToken(token: string): PasswordResetTokenParts | null 
   return { selector, verifier };
 }
 
+function hashTwoFactorNonce(nonce: string): string {
+  return createHash('sha256').update(nonce, 'utf8').digest('hex');
+}
+
+function normalizeBackupCode(code: string): string {
+  return code.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+}
+
+function createBackupCode(): string {
+  const normalized = randomBytes(TWO_FACTOR_BACKUP_CODE_BYTES).toString('hex').toUpperCase();
+  const chunks = normalized.match(/.{1,4}/g);
+
+  return chunks?.join('-') ?? normalized;
+}
+
+function parseBackupCodeHashes(value: Prisma.JsonValue | null): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((item): item is string => typeof item === 'string' && item.length > 0);
+}
+
+function isTwoFactorChallengePayload(
+  payload: unknown,
+): payload is VerifiedTwoFactorChallengeJwtPayload {
+  if (!payload || typeof payload !== 'object') {
+    return false;
+  }
+
+  const candidate = payload as TwoFactorChallengeJwtPayload;
+
+  return (
+    isString(candidate.sub) &&
+    isString(candidate.pwChangedAt) &&
+    (candidate.purpose === '2fa' || candidate.purpose === '2fa_setup') &&
+    isString(candidate.nonce)
+  );
+}
+
 function isUniqueConstraintError(error: unknown): boolean {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
 }
@@ -210,7 +339,7 @@ function sleep(milliseconds: number): Promise<void> {
 }
 
 @Injectable()
-export class AuthService implements OnModuleDestroy {
+export class AuthService implements OnModuleInit, OnModuleDestroy {
   private readonly prisma = new PrismaClient();
 
   constructor(
@@ -221,8 +350,70 @@ export class AuthService implements OnModuleDestroy {
     void this.cryptoService;
   }
 
+  async onModuleInit(): Promise<void> {
+    await this.upgradeLegacyTwoFactorSecrets();
+  }
+
   async onModuleDestroy(): Promise<void> {
     await this.prisma.$disconnect();
+  }
+
+  private async upgradeLegacyTwoFactorSecrets(): Promise<void> {
+    let hasLegacySecrets = true;
+
+    while (hasLegacySecrets) {
+      const users = await this.prisma.user.findMany({
+        where: {
+          twoFactorSecret: {
+            not: null,
+          },
+        },
+        select: { id: true },
+        take: LEGACY_TWO_FACTOR_UPGRADE_BATCH_SIZE,
+        orderBy: { id: 'asc' },
+      });
+
+      if (users.length === 0) {
+        hasLegacySecrets = false;
+        continue;
+      }
+
+      for (const user of users) {
+        await this.upgradeLegacyTwoFactorSecret(user.id);
+      }
+    }
+  }
+
+  private async upgradeLegacyTwoFactorSecret(userId: string): Promise<void> {
+    await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      await this.lockUserAuthSessions(tx, userId);
+
+      const user = await tx.user.findUnique({
+        where: { id: userId },
+        select: {
+          id: true,
+          twoFactorSecret: true,
+          twoFactorSecretEncrypted: true,
+        },
+      });
+
+      if (!user?.twoFactorSecret) {
+        return;
+      }
+
+      const data: Prisma.UserUpdateInput = user.twoFactorSecretEncrypted
+        ? { twoFactorSecret: null }
+        : {
+            twoFactorSecret: null,
+            twoFactorSecretEncrypted: this.cryptoService.encrypt(user.twoFactorSecret),
+          };
+
+      await tx.user.update({
+        where: { id: user.id },
+        data,
+        select: { id: true },
+      });
+    });
   }
 
   async register(dto: RegisterDto): Promise<SafeUserPayload> {
@@ -287,7 +478,6 @@ export class AuthService implements OnModuleDestroy {
       throw new UnauthorizedException('Invalid email or password');
     }
 
-    const refreshTokenMaterial = await this.createRefreshTokenMaterial();
     const loginSession = await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       await this.lockUserAuthSessions(tx, user.id);
 
@@ -297,6 +487,9 @@ export class AuthService implements OnModuleDestroy {
           ...this.safeUserSelect(),
           passwordHash: true,
           passwordChangedAt: true,
+          twoFactorEnabled: true,
+          twoFactorSecret: true,
+          twoFactorSecretEncrypted: true,
           deletedAt: true,
         },
       });
@@ -331,6 +524,40 @@ export class AuthService implements OnModuleDestroy {
         passwordChangedAt,
       };
 
+      if (lockedUser.twoFactorEnabled) {
+        const encryptedSecret = await this.ensureEncryptedTwoFactorSecretInTransaction(
+          tx,
+          lockedUser,
+        );
+
+        if (!encryptedSecret) {
+          throw new UnauthorizedException('Invalid email or password');
+        }
+
+        const nonce = await this.createTwoFactorChallengeInTransaction(tx, lockedUser.id, '2fa');
+
+        return {
+          status: 'twoFactorRequired' as const,
+          authenticatedUser,
+          nonce,
+        };
+      }
+
+      if (lockedUser.platformRole === PlatformRole.PLATFORM_ADMIN) {
+        const nonce = await this.createTwoFactorChallengeInTransaction(
+          tx,
+          lockedUser.id,
+          '2fa_setup',
+        );
+
+        return {
+          status: 'twoFactorSetupRequired' as const,
+          authenticatedUser,
+          nonce,
+        };
+      }
+
+      const refreshTokenMaterial = await this.createRefreshTokenMaterial();
       await this.createRefreshTokenInTransaction(tx, authenticatedUser, refreshTokenMaterial);
 
       await tx.user.update({
@@ -340,6 +567,7 @@ export class AuthService implements OnModuleDestroy {
       });
 
       return {
+        status: 'completed' as const,
         authenticatedUser,
         refreshToken: this.serializeRefreshTokenCookieValue(
           refreshTokenMaterial.tokenId,
@@ -347,6 +575,28 @@ export class AuthService implements OnModuleDestroy {
         ),
       };
     });
+
+    if (loginSession.status === 'twoFactorSetupRequired') {
+      return {
+        requiresTwoFactorSetup: true,
+        setupToken: await this.signTwoFactorChallengeToken(
+          loginSession.authenticatedUser,
+          loginSession.nonce,
+          '2fa_setup',
+        ),
+      };
+    }
+
+    if (loginSession.status === 'twoFactorRequired') {
+      return {
+        requiresTwoFactor: true,
+        challengeToken: await this.signTwoFactorChallengeToken(
+          loginSession.authenticatedUser,
+          loginSession.nonce,
+          '2fa',
+        ),
+      };
+    }
 
     const accessToken = await this.signAccessToken(loginSession.authenticatedUser);
 
@@ -576,7 +826,302 @@ export class AuthService implements OnModuleDestroy {
     };
   }
 
-  async refresh(user: AuthenticatedAuthUser, rawRefreshToken: string): Promise<LoginResult> {
+  async generateTwoFactorSetup(
+    authorizationHeader: string | undefined,
+    dto: TwoFactorGenerateDto,
+  ): Promise<TwoFactorSetupResponse> {
+    const identity = await this.authenticateTwoFactorSetupIdentity(
+      authorizationHeader,
+      dto.setupToken,
+    );
+    const secret = generateSecret();
+    const encryptedSecret = this.cryptoService.encrypt(secret);
+
+    const lockedUser = await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      await this.lockUserAuthSessions(tx, identity.user.id);
+
+      const currentUser = await tx.user.findUnique({
+        where: { id: identity.user.id },
+        select: {
+          id: true,
+          email: true,
+          passwordChangedAt: true,
+          twoFactorEnabled: true,
+          deletedAt: true,
+        },
+      });
+
+      if (!currentUser || currentUser.deletedAt) {
+        throw new UnauthorizedException('Invalid token payload');
+      }
+
+      if (identity.setupTokenPayload) {
+        if (
+          !currentUser.passwordChangedAt ||
+          identity.setupTokenPayload.pwChangedAt !==
+            passwordChangedAtClaim(currentUser.passwordChangedAt)
+        ) {
+          throw new UnauthorizedException('Invalid token payload');
+        }
+
+        await this.assertTwoFactorChallengeActiveInTransaction(
+          tx,
+          identity.setupTokenPayload,
+          '2fa_setup',
+          new Date(),
+        );
+      }
+
+      if (currentUser.twoFactorEnabled) {
+        throw new BadRequestException('Two-factor authentication is already enabled');
+      }
+
+      await tx.user.update({
+        where: { id: currentUser.id },
+        data: {
+          twoFactorSecret: null,
+          twoFactorSecretEncrypted: encryptedSecret,
+          twoFactorBackupCodesHash: Prisma.DbNull,
+          twoFactorEnabled: false,
+          twoFactorEnabledAt: null,
+          twoFactorLastValidatedAt: null,
+        },
+        select: { id: true },
+      });
+
+      return currentUser;
+    });
+
+    const otpauthUrl = generateURI({
+      issuer: TOTP_ISSUER,
+      label: lockedUser.email,
+      secret,
+      digits: TOTP_DIGITS,
+      period: TOTP_STEP_SECONDS,
+    });
+    const qrCode = await QRCode.toDataURL(otpauthUrl, { type: 'image/png' });
+
+    return {
+      qrCode,
+      manualEntryKey: secret,
+    };
+  }
+
+  async verifyTwoFactorSetup(
+    authorizationHeader: string | undefined,
+    dto: TwoFactorVerifyDto,
+  ): Promise<TwoFactorVerifyResponse> {
+    const identity = await this.authenticateTwoFactorSetupIdentity(
+      authorizationHeader,
+      dto.setupToken,
+    );
+    const now = new Date();
+    const backupCodes = Array.from({ length: TWO_FACTOR_BACKUP_CODE_COUNT }, () =>
+      createBackupCode(),
+    );
+    const backupCodeHashes = await this.hashBackupCodes(backupCodes);
+
+    await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      await this.lockUserAuthSessions(tx, identity.user.id);
+
+      const currentUser = await tx.user.findUnique({
+        where: { id: identity.user.id },
+        select: {
+          id: true,
+          passwordChangedAt: true,
+          twoFactorEnabled: true,
+          twoFactorSecretEncrypted: true,
+          deletedAt: true,
+        },
+      });
+
+      if (!currentUser || currentUser.deletedAt) {
+        throw new UnauthorizedException('Invalid token payload');
+      }
+
+      if (
+        identity.setupTokenPayload &&
+        (!currentUser.passwordChangedAt ||
+          identity.setupTokenPayload.pwChangedAt !==
+            passwordChangedAtClaim(currentUser.passwordChangedAt))
+      ) {
+        throw new UnauthorizedException('Invalid token payload');
+      }
+
+      if (currentUser.twoFactorEnabled || !currentUser.twoFactorSecretEncrypted) {
+        throw new BadRequestException('Two-factor authentication setup is not pending');
+      }
+
+      if (!(await this.verifyTotpCode(currentUser.twoFactorSecretEncrypted, dto.code))) {
+        throw new UnauthorizedException(TWO_FACTOR_INVALID_MESSAGE);
+      }
+
+      await tx.user.update({
+        where: { id: currentUser.id },
+        data: {
+          twoFactorEnabled: true,
+          twoFactorSecret: null,
+          twoFactorBackupCodesHash: backupCodeHashes,
+          twoFactorEnabledAt: now,
+          twoFactorLastValidatedAt: now,
+          passwordChangedAt: now,
+        },
+        select: { id: true },
+      });
+
+      if (identity.setupTokenPayload) {
+        await this.consumeTwoFactorChallengeInTransaction(
+          tx,
+          identity.setupTokenPayload,
+          '2fa_setup',
+          now,
+        );
+      }
+
+      await this.invalidateActiveRefreshTokenFamiliesForUserInTransaction(tx, currentUser.id, now);
+    });
+
+    return {
+      success: true,
+      backupCodes,
+    };
+  }
+
+  async validateTwoFactorLogin(dto: TwoFactorValidateDto): Promise<TwoFactorValidateResult> {
+    const payload = await this.verifyTwoFactorChallengeToken(dto.challengeToken);
+    const now = new Date();
+
+    const result = await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      await this.lockUserAuthSessions(tx, payload.sub);
+
+      const user = await tx.user.findUnique({
+        where: { id: payload.sub },
+        select: this.twoFactorUserSelect(),
+      });
+
+      if (
+        !user ||
+        user.deletedAt ||
+        !user.passwordChangedAt ||
+        payload.pwChangedAt !== passwordChangedAtClaim(user.passwordChangedAt) ||
+        !user.twoFactorEnabled
+      ) {
+        throw new UnauthorizedException(TWO_FACTOR_INVALID_MESSAGE);
+      }
+
+      await this.assertTwoFactorChallengeActiveInTransaction(tx, payload, '2fa', now);
+
+      const encryptedSecret = await this.ensureEncryptedTwoFactorSecretInTransaction(tx, user);
+      const secondFactor = await this.verifySecondFactor(
+        { ...user, twoFactorSecretEncrypted: encryptedSecret },
+        dto.code,
+      );
+
+      if (!secondFactor.valid) {
+        throw new UnauthorizedException(TWO_FACTOR_INVALID_MESSAGE);
+      }
+
+      await this.consumeTwoFactorChallengeInTransaction(tx, payload, '2fa', now);
+
+      await tx.user.update({
+        where: { id: user.id },
+        data: {
+          twoFactorLastValidatedAt: now,
+          lastLoginAt: now,
+          ...(secondFactor.remainingBackupCodeHashes
+            ? { twoFactorBackupCodesHash: secondFactor.remainingBackupCodeHashes }
+            : {}),
+        },
+        select: { id: true },
+      });
+
+      const refreshTokenMaterial = await this.createRefreshTokenMaterial();
+      const authenticatedUser: TokenReadyAuthUser = {
+        ...this.toSafeUser(user),
+        passwordChangedAt: user.passwordChangedAt,
+      };
+      await this.createRefreshTokenInTransaction(tx, authenticatedUser, refreshTokenMaterial, {
+        secondFactorSatisfiedAt: now,
+      });
+
+      return {
+        authenticatedUser,
+        refreshToken: this.serializeRefreshTokenCookieValue(
+          refreshTokenMaterial.tokenId,
+          refreshTokenMaterial.rawSecret,
+        ),
+      };
+    });
+
+    return {
+      accessToken: await this.signAccessToken(result.authenticatedUser),
+      refreshToken: result.refreshToken,
+    };
+  }
+
+  async disableTwoFactor(user: AuthenticatedAuthUser, dto: TwoFactorDisableDto): Promise<void> {
+    if (!isBcryptPasswordInputLengthValid(dto.password)) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+
+    const now = new Date();
+
+    await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      await this.lockUserAuthSessions(tx, user.id);
+
+      const currentUser = await tx.user.findUnique({
+        where: { id: user.id },
+        select: {
+          ...this.twoFactorUserSelect(),
+          passwordHash: true,
+        },
+      });
+
+      if (!currentUser || currentUser.deletedAt || !currentUser.twoFactorEnabled) {
+        throw new UnauthorizedException('Invalid credentials');
+      }
+
+      const passwordMatches = await bcrypt.compare(dto.password, currentUser.passwordHash);
+
+      if (!passwordMatches) {
+        throw new UnauthorizedException('Invalid credentials');
+      }
+
+      const encryptedSecret = await this.ensureEncryptedTwoFactorSecretInTransaction(
+        tx,
+        currentUser,
+      );
+      const secondFactor = await this.verifySecondFactor(
+        { ...currentUser, twoFactorSecretEncrypted: encryptedSecret },
+        dto.code,
+      );
+
+      if (!secondFactor.valid) {
+        throw new UnauthorizedException('Invalid credentials');
+      }
+
+      await tx.user.update({
+        where: { id: currentUser.id },
+        data: {
+          twoFactorEnabled: false,
+          twoFactorSecret: null,
+          twoFactorSecretEncrypted: null,
+          twoFactorBackupCodesHash: Prisma.DbNull,
+          twoFactorEnabledAt: null,
+          twoFactorLastValidatedAt: null,
+          passwordChangedAt: now,
+        },
+        select: { id: true },
+      });
+
+      await this.invalidateActiveRefreshTokenFamiliesForUserInTransaction(tx, currentUser.id, now);
+    });
+  }
+
+  async refresh(
+    user: AuthenticatedAuthUser,
+    rawRefreshToken: string,
+  ): Promise<CompletedLoginResult> {
     const existingToken = await this.findStoredRefreshToken(user.id, rawRefreshToken);
 
     if (!existingToken) {
@@ -701,6 +1246,7 @@ export class AuthService implements OnModuleDestroy {
       select: {
         ...this.safeUserSelect(),
         passwordChangedAt: true,
+        twoFactorEnabled: true,
         deletedAt: true,
       },
     });
@@ -758,6 +1304,7 @@ export class AuthService implements OnModuleDestroy {
       select: {
         ...this.safeUserSelect(),
         passwordChangedAt: true,
+        twoFactorEnabled: true,
         deletedAt: true,
       },
     });
@@ -770,10 +1317,21 @@ export class AuthService implements OnModuleDestroy {
       throw new UnauthorizedException('Invalid token payload');
     }
 
+    if (this.isPlatformAdminMissingTwoFactor(user)) {
+      throw new UnauthorizedException('Invalid token payload');
+    }
+
     return {
       ...this.toSafeUser(user),
       passwordChangedAt: user.passwordChangedAt,
     };
+  }
+
+  private isPlatformAdminMissingTwoFactor(user: {
+    platformRole: PlatformRole;
+    twoFactorEnabled: boolean;
+  }): boolean {
+    return user.platformRole === PlatformRole.PLATFORM_ADMIN && !user.twoFactorEnabled;
   }
 
   private async signAccessToken(user: TokenReadyAuthUser): Promise<string> {
@@ -781,6 +1339,117 @@ export class AuthService implements OnModuleDestroy {
       secret: this.getAccessTokenSecret(),
       expiresIn: ACCESS_TOKEN_EXPIRES_IN,
     });
+  }
+
+  private async signTwoFactorChallengeToken(
+    user: TokenReadyAuthUser,
+    nonce: string,
+    purpose: TwoFactorChallengePurpose,
+  ): Promise<string> {
+    return this.jwtService.signAsync(
+      {
+        sub: user.id,
+        pwChangedAt: passwordChangedAtClaim(user.passwordChangedAt),
+        purpose,
+        nonce,
+      },
+      {
+        secret: this.getTwoFactorChallengeSecret(),
+        expiresIn: TWO_FACTOR_CHALLENGE_EXPIRES_IN,
+      },
+    );
+  }
+
+  private async verifyTwoFactorChallengeToken(
+    challengeToken: string,
+  ): Promise<VerifiedTwoFactorChallengeJwtPayload> {
+    try {
+      const payload = await this.jwtService.verifyAsync<Record<string, unknown>>(challengeToken, {
+        secret: this.getTwoFactorChallengeSecret(),
+      });
+
+      if (!isTwoFactorChallengePayload(payload)) {
+        throw new UnauthorizedException(TWO_FACTOR_INVALID_MESSAGE);
+      }
+
+      return payload;
+    } catch {
+      throw new UnauthorizedException(TWO_FACTOR_INVALID_MESSAGE);
+    }
+  }
+
+  private async authenticateTwoFactorSetupIdentity(
+    authorizationHeader: string | undefined,
+    setupToken: string | undefined,
+  ): Promise<TwoFactorSetupIdentity> {
+    if (setupToken) {
+      const payload = await this.verifyTwoFactorChallengeToken(setupToken);
+
+      if (payload.purpose !== '2fa_setup') {
+        throw new UnauthorizedException('Invalid token payload');
+      }
+
+      const user = await this.prisma.user.findUnique({
+        where: { id: payload.sub },
+        select: {
+          ...this.safeUserSelect(),
+          passwordChangedAt: true,
+          deletedAt: true,
+        },
+      });
+
+      if (
+        !user ||
+        user.deletedAt ||
+        !user.passwordChangedAt ||
+        payload.pwChangedAt !== passwordChangedAtClaim(user.passwordChangedAt)
+      ) {
+        throw new UnauthorizedException('Invalid token payload');
+      }
+
+      return {
+        user: {
+          ...this.toSafeUser(user),
+          passwordChangedAt: user.passwordChangedAt,
+        },
+        setupTokenPayload: payload,
+      };
+    }
+
+    const bearerToken = this.getBearerToken(authorizationHeader);
+
+    if (!bearerToken) {
+      throw new UnauthorizedException('Missing authenticated user');
+    }
+
+    let payload: Record<string, unknown>;
+
+    try {
+      payload = await this.jwtService.verifyAsync<Record<string, unknown>>(bearerToken, {
+        secret: this.getAccessTokenSecret(),
+      });
+    } catch {
+      throw new UnauthorizedException('Invalid token payload');
+    }
+
+    return {
+      user: await this.validateAccessPayload(payload),
+      setupTokenPayload: null,
+    };
+  }
+
+  private getBearerToken(authorizationHeader: string | undefined): string | null {
+    if (!authorizationHeader) {
+      return null;
+    }
+
+    const [scheme, token] = authorizationHeader.split(' ');
+
+    if (scheme !== 'Bearer' || !token) {
+      return null;
+    }
+
+    return token;
   }
 
   private async ensurePasswordChangedAt(user: AuthenticatedAuthUser): Promise<TokenReadyAuthUser> {
@@ -823,15 +1492,118 @@ export class AuthService implements OnModuleDestroy {
     };
   }
 
+  private async hashBackupCodes(backupCodes: string[]): Promise<string[]> {
+    return Promise.all(
+      backupCodes.map((backupCode) =>
+        bcrypt.hash(normalizeBackupCode(backupCode), REFRESH_TOKEN_SALT_ROUNDS),
+      ),
+    );
+  }
+
+  private async verifyTotpCode(encryptedSecret: string, code: string): Promise<boolean> {
+    try {
+      const secret = this.cryptoService.decrypt(encryptedSecret);
+      const normalizedCode = code.trim().replace(/\s/g, '');
+      const result = await verify({
+        secret,
+        token: normalizedCode,
+        digits: TOTP_DIGITS,
+        period: TOTP_STEP_SECONDS,
+        epochTolerance: TOTP_WINDOW * TOTP_STEP_SECONDS,
+      });
+
+      return result.valid;
+    } catch {
+      return false;
+    }
+  }
+
+  private async verifySecondFactor(
+    user: TwoFactorUserState,
+    code: string,
+  ): Promise<SecondFactorVerificationResult> {
+    if (!user.twoFactorSecretEncrypted) {
+      return { valid: false };
+    }
+
+    if (await this.verifyTotpCode(user.twoFactorSecretEncrypted, code)) {
+      return {
+        valid: true,
+        remainingBackupCodeHashes: null,
+      };
+    }
+
+    const normalizedBackupCode = normalizeBackupCode(code);
+
+    if (!normalizedBackupCode) {
+      return { valid: false };
+    }
+
+    const backupCodeHashes = parseBackupCodeHashes(user.twoFactorBackupCodesHash);
+
+    for (const [index, backupCodeHash] of backupCodeHashes.entries()) {
+      const backupCodeMatches = await bcrypt.compare(normalizedBackupCode, backupCodeHash);
+
+      if (backupCodeMatches) {
+        return {
+          valid: true,
+          remainingBackupCodeHashes: backupCodeHashes.filter((_, itemIndex) => itemIndex !== index),
+        };
+      }
+    }
+
+    return { valid: false };
+  }
+
+  private async ensureEncryptedTwoFactorSecretInTransaction(
+    tx: Prisma.TransactionClient,
+    user: {
+      id: string;
+      twoFactorSecret: string | null;
+      twoFactorSecretEncrypted: string | null;
+    },
+  ): Promise<string | null> {
+    if (user.twoFactorSecretEncrypted) {
+      if (user.twoFactorSecret) {
+        await tx.user.update({
+          where: { id: user.id },
+          data: { twoFactorSecret: null },
+          select: { id: true },
+        });
+      }
+
+      return user.twoFactorSecretEncrypted;
+    }
+
+    if (!user.twoFactorSecret) {
+      return null;
+    }
+
+    const encryptedSecret = this.cryptoService.encrypt(user.twoFactorSecret);
+
+    await tx.user.update({
+      where: { id: user.id },
+      data: {
+        twoFactorSecretEncrypted: encryptedSecret,
+        twoFactorSecret: null,
+      },
+      select: { id: true },
+    });
+
+    return encryptedSecret;
+  }
+
   private async createRefreshTokenInTransaction(
     tx: Prisma.TransactionClient,
     user: AuthenticatedAuthUser,
     token: RefreshTokenMaterial,
+    options: RefreshTokenFamilyCreateOptions = {},
   ): Promise<void> {
     await tx.refreshTokenFamily.create({
       data: {
         id: token.familyId,
         userId: user.id,
+        secondFactorSatisfiedAt: options.secondFactorSatisfiedAt ?? null,
       },
       select: { id: true },
     });
@@ -846,6 +1618,74 @@ export class AuthService implements OnModuleDestroy {
       },
       select: { id: true },
     });
+  }
+
+  private async createTwoFactorChallengeInTransaction(
+    tx: Prisma.TransactionClient,
+    userId: string,
+    purpose: TwoFactorChallengePurpose,
+  ): Promise<string> {
+    const nonce = randomBytes(32).toString('base64url');
+
+    await tx.twoFactorChallenge.create({
+      data: {
+        userId,
+        purpose,
+        nonceHash: hashTwoFactorNonce(nonce),
+        expiresAt: new Date(Date.now() + TWO_FACTOR_CHALLENGE_TTL_MS),
+      },
+      select: { id: true },
+    });
+
+    return nonce;
+  }
+
+  private async assertTwoFactorChallengeActiveInTransaction(
+    tx: Prisma.TransactionClient,
+    payload: VerifiedTwoFactorChallengeJwtPayload,
+    purpose: TwoFactorChallengePurpose,
+    now: Date,
+  ): Promise<void> {
+    const challenge = await tx.twoFactorChallenge.findFirst({
+      where: {
+        userId: payload.sub,
+        purpose,
+        nonceHash: hashTwoFactorNonce(payload.nonce),
+        usedAt: null,
+        expiresAt: {
+          gt: now,
+        },
+      },
+      select: { id: true },
+    });
+
+    if (!challenge) {
+      throw new UnauthorizedException(TWO_FACTOR_INVALID_MESSAGE);
+    }
+  }
+
+  private async consumeTwoFactorChallengeInTransaction(
+    tx: Prisma.TransactionClient,
+    payload: VerifiedTwoFactorChallengeJwtPayload,
+    purpose: TwoFactorChallengePurpose,
+    now: Date,
+  ): Promise<void> {
+    const usedChallenge = await tx.twoFactorChallenge.updateMany({
+      where: {
+        userId: payload.sub,
+        purpose,
+        nonceHash: hashTwoFactorNonce(payload.nonce),
+        usedAt: null,
+        expiresAt: {
+          gt: now,
+        },
+      },
+      data: { usedAt: now },
+    });
+
+    if (usedChallenge.count !== 1) {
+      throw new UnauthorizedException(TWO_FACTOR_INVALID_MESSAGE);
+    }
   }
 
   private async rotateRefreshToken(
@@ -866,10 +1706,36 @@ export class AuthService implements OnModuleDestroy {
             userId: true,
             compromisedAt: true,
             invalidatedAt: true,
+            secondFactorSatisfiedAt: true,
           },
         });
 
         if (!family || family.userId !== user.id || family.compromisedAt || family.invalidatedAt) {
+          return { status: 'invalid' } satisfies RotationResult;
+        }
+
+        const currentUser = await tx.user.findUnique({
+          where: { id: user.id },
+          select: {
+            id: true,
+            platformRole: true,
+            twoFactorEnabled: true,
+            deletedAt: true,
+          },
+        });
+
+        if (!currentUser || currentUser.deletedAt) {
+          await this.invalidateRefreshTokenFamilyInTransaction(tx, family.id, now);
+
+          return { status: 'invalid' } satisfies RotationResult;
+        }
+
+        if (
+          this.isPlatformAdminMissingTwoFactor(currentUser) ||
+          (currentUser.twoFactorEnabled && !family.secondFactorSatisfiedAt)
+        ) {
+          await this.invalidateRefreshTokenFamilyInTransaction(tx, family.id, now);
+
           return { status: 'invalid' } satisfies RotationResult;
         }
 
@@ -986,6 +1852,33 @@ export class AuthService implements OnModuleDestroy {
     await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       await this.lockRefreshTokenFamily(tx, familyId);
       await this.compromiseRefreshTokenFamilyInTransaction(tx, familyId, now);
+    });
+  }
+
+  private async invalidateRefreshTokenFamilyInTransaction(
+    tx: Prisma.TransactionClient,
+    familyId: string,
+    invalidatedAt: Date,
+  ): Promise<void> {
+    await tx.refreshTokenFamily.updateMany({
+      where: {
+        id: familyId,
+        invalidatedAt: null,
+      },
+      data: {
+        invalidatedAt,
+      },
+    });
+
+    await tx.refreshToken.updateMany({
+      where: {
+        familyId,
+        revokedAt: null,
+      },
+      data: {
+        revokedAt: invalidatedAt,
+        revocationReason: TokenRevocationReason.LOGOUT,
+      },
     });
   }
 
@@ -1111,6 +2004,10 @@ export class AuthService implements OnModuleDestroy {
     return getJwtAccessSecret();
   }
 
+  private getTwoFactorChallengeSecret(): string {
+    return `${this.getAccessTokenSecret()}:two-factor-challenge`;
+  }
+
   private assertPasswordWithinBcryptLimit(password: string): void {
     if (!isBcryptPasswordInputLengthValid(password)) {
       throw new BadRequestException('password must be at most 72 UTF-8 bytes');
@@ -1125,6 +2022,18 @@ export class AuthService implements OnModuleDestroy {
       platformRole: true,
       createdAt: true,
       updatedAt: true,
+    } satisfies Prisma.UserSelect;
+  }
+
+  private twoFactorUserSelect() {
+    return {
+      ...this.safeUserSelect(),
+      passwordChangedAt: true,
+      twoFactorEnabled: true,
+      twoFactorSecret: true,
+      twoFactorSecretEncrypted: true,
+      twoFactorBackupCodesHash: true,
+      deletedAt: true,
     } satisfies Prisma.UserSelect;
   }
 }
