@@ -53,6 +53,21 @@ const TWO_FACTOR_BACKUP_CODE_COUNT = 10;
 const TWO_FACTOR_BACKUP_CODE_BYTES = 10;
 const LEGACY_TWO_FACTOR_UPGRADE_BATCH_SIZE = 100;
 const TWO_FACTOR_INVALID_MESSAGE = 'Invalid two-factor authentication code';
+const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+const OAUTH_STATE_BYTES = 32;
+const GOOGLE_OAUTH_PROVIDER = 'google';
+const MICROSOFT_OAUTH_PROVIDER = 'microsoft';
+const GOOGLE_OAUTH_AUTHORIZATION_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
+const GOOGLE_OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token';
+const GOOGLE_OAUTH_PROFILE_URL = 'https://openidconnect.googleapis.com/v1/userinfo';
+const GOOGLE_OAUTH_SCOPES = [
+  'openid',
+  'email',
+  'https://www.googleapis.com/auth/gmail.readonly',
+] as const;
+const MICROSOFT_OAUTH_AUTHORITY_URL = 'https://login.microsoftonline.com';
+const MICROSOFT_OAUTH_PROFILE_URL = 'https://graph.microsoft.com/v1.0/me';
+const MICROSOFT_OAUTH_SCOPES = ['offline_access', 'User.Read', 'Mail.Read'] as const;
 
 export const REFRESH_TOKEN_COOKIE_NAME = 'infranex_refresh_token';
 
@@ -77,6 +92,20 @@ type VerifiedTwoFactorChallengeJwtPayload = {
 };
 
 type TwoFactorChallengePurpose = '2fa' | '2fa_setup';
+
+type OAuthProvider = typeof GOOGLE_OAUTH_PROVIDER | typeof MICROSOFT_OAUTH_PROVIDER;
+
+type OAuthProviderConfig = {
+  provider: OAuthProvider;
+  clientId: string;
+  clientSecret: string;
+  callbackUrl: string;
+  authorizationUrl: string;
+  tokenUrl: string;
+  scopes: readonly string[];
+  requiredScopes: readonly string[];
+  extraAuthorizationParams?: Record<string, string>;
+};
 
 type SafeUserSource = {
   id: string;
@@ -135,6 +164,11 @@ export type TwoFactorValidateResult = AccessTokenResponse & {
   refreshToken: string;
 };
 
+export type OAuthConnectionResult = {
+  success: true;
+  provider: OAuthProvider;
+};
+
 export type RefreshCookieOptions = {
   httpOnly: true;
   sameSite: 'lax';
@@ -180,6 +214,21 @@ type PasswordResetTokenParts = {
   verifier: string;
 };
 
+type OAuthStateRecord = {
+  userId: string;
+};
+
+type OAuthTokenSet = {
+  accessToken: string;
+  refreshToken: string | null;
+  expiresAt: Date | null;
+  scopes: string | null;
+};
+
+type OAuthProviderAccount = {
+  providerAccountId: string;
+};
+
 type RefreshTokenMaterial = {
   familyId: string;
   tokenId: string;
@@ -217,6 +266,10 @@ type SecondFactorVerificationResult =
 
 function isString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function normalizeEmail(email: string): string {
@@ -290,6 +343,10 @@ function parsePasswordResetToken(token: string): PasswordResetTokenParts | null 
 
 function hashTwoFactorNonce(nonce: string): string {
   return createHash('sha256').update(nonce, 'utf8').digest('hex');
+}
+
+function hashOAuthState(state: string): string {
+  return createHash('sha256').update(state, 'utf8').digest('hex');
 }
 
 function normalizeBackupCode(code: string): string {
@@ -1116,6 +1173,66 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
 
       await this.invalidateActiveRefreshTokenFamiliesForUserInTransaction(tx, currentUser.id, now);
     });
+  }
+
+  async createOAuthAuthorizationUrl(
+    user: AuthenticatedAuthUser,
+    provider: OAuthProvider,
+  ): Promise<string> {
+    const config = this.getOAuthProviderConfig(provider);
+    const rawState = randomBytes(OAUTH_STATE_BYTES).toString('base64url');
+    const stateHash = hashOAuthState(rawState);
+
+    await this.prisma.oAuthState.create({
+      data: {
+        provider,
+        userId: user.id,
+        stateHash,
+        expiresAt: new Date(Date.now() + OAUTH_STATE_TTL_MS),
+      },
+      select: { id: true },
+    });
+
+    const authorizationUrl = new URL(config.authorizationUrl);
+    authorizationUrl.searchParams.set('client_id', config.clientId);
+    authorizationUrl.searchParams.set('redirect_uri', config.callbackUrl);
+    authorizationUrl.searchParams.set('response_type', 'code');
+    authorizationUrl.searchParams.set('scope', config.scopes.join(' '));
+    authorizationUrl.searchParams.set('state', rawState);
+
+    for (const [name, value] of Object.entries(config.extraAuthorizationParams ?? {})) {
+      authorizationUrl.searchParams.set(name, value);
+    }
+
+    return authorizationUrl.toString();
+  }
+
+  async connectOAuthProvider(
+    provider: OAuthProvider,
+    code: string | undefined,
+    state: string | undefined,
+    providerError: string | undefined,
+  ): Promise<OAuthConnectionResult> {
+    if (!isString(state)) {
+      throw new BadRequestException('Invalid OAuth callback');
+    }
+
+    const stateRecord = await this.consumeOAuthState(provider, state);
+
+    if (isString(providerError) || !isString(code)) {
+      throw new BadRequestException('Invalid OAuth callback');
+    }
+
+    const config = this.getOAuthProviderConfig(provider);
+    const tokenSet = await this.exchangeOAuthCode(config, code);
+    const providerAccount = await this.fetchOAuthProviderAccount(provider, tokenSet.accessToken);
+
+    await this.storeOAuthAccount(stateRecord.userId, provider, providerAccount, tokenSet);
+
+    return {
+      success: true,
+      provider,
+    };
   }
 
   async refresh(
@@ -2006,6 +2123,375 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
 
   private getTwoFactorChallengeSecret(): string {
     return `${this.getAccessTokenSecret()}:two-factor-challenge`;
+  }
+
+  private getOAuthProviderConfig(provider: OAuthProvider): OAuthProviderConfig {
+    if (provider === GOOGLE_OAUTH_PROVIDER) {
+      return {
+        provider,
+        clientId: this.requireOAuthEnv('GOOGLE_CLIENT_ID'),
+        clientSecret: this.requireOAuthEnv('GOOGLE_CLIENT_SECRET'),
+        callbackUrl: this.requireOAuthEnv('GOOGLE_CALLBACK_URL'),
+        authorizationUrl: GOOGLE_OAUTH_AUTHORIZATION_URL,
+        tokenUrl: GOOGLE_OAUTH_TOKEN_URL,
+        scopes: GOOGLE_OAUTH_SCOPES,
+        requiredScopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+        extraAuthorizationParams: {
+          access_type: 'offline',
+          prompt: 'consent',
+        },
+      };
+    }
+
+    if (provider === MICROSOFT_OAUTH_PROVIDER) {
+      const tenantId = process.env.MICROSOFT_TENANT_ID?.trim() || 'common';
+      const encodedTenantId = encodeURIComponent(tenantId);
+
+      return {
+        provider,
+        clientId: this.requireOAuthEnv('MICROSOFT_CLIENT_ID'),
+        clientSecret: this.requireOAuthEnv('MICROSOFT_CLIENT_SECRET'),
+        callbackUrl: this.requireOAuthEnv('MICROSOFT_CALLBACK_URL'),
+        authorizationUrl: `${MICROSOFT_OAUTH_AUTHORITY_URL}/${encodedTenantId}/oauth2/v2.0/authorize`,
+        tokenUrl: `${MICROSOFT_OAUTH_AUTHORITY_URL}/${encodedTenantId}/oauth2/v2.0/token`,
+        scopes: MICROSOFT_OAUTH_SCOPES,
+        requiredScopes: ['Mail.Read'],
+      };
+    }
+
+    throw new BadRequestException('Unsupported OAuth provider');
+  }
+
+  private requireOAuthEnv(name: string): string {
+    const value = process.env[name]?.trim();
+
+    if (!value) {
+      throw new Error(`${name} must be configured`);
+    }
+
+    return value;
+  }
+
+  private async consumeOAuthState(
+    provider: OAuthProvider,
+    rawState: string,
+  ): Promise<OAuthStateRecord> {
+    const now = new Date();
+    const stateHash = hashOAuthState(rawState);
+
+    const stateRecord = await this.prisma.oAuthState.findFirst({
+      where: {
+        provider,
+        stateHash,
+        usedAt: null,
+        expiresAt: {
+          gt: now,
+        },
+      },
+      select: {
+        id: true,
+        userId: true,
+      },
+    });
+
+    if (!stateRecord) {
+      throw new UnauthorizedException('Invalid OAuth state');
+    }
+
+    const consumedState = await this.prisma.oAuthState.updateMany({
+      where: {
+        id: stateRecord.id,
+        usedAt: null,
+        expiresAt: {
+          gt: now,
+        },
+      },
+      data: {
+        usedAt: now,
+      },
+    });
+
+    if (consumedState.count !== 1) {
+      throw new UnauthorizedException('Invalid OAuth state');
+    }
+
+    return {
+      userId: stateRecord.userId,
+    };
+  }
+
+  private async exchangeOAuthCode(
+    config: OAuthProviderConfig,
+    code: string,
+  ): Promise<OAuthTokenSet> {
+    const body = new URLSearchParams({
+      client_id: config.clientId,
+      client_secret: config.clientSecret,
+      code,
+      grant_type: 'authorization_code',
+      redirect_uri: config.callbackUrl,
+    });
+
+    const response = await fetch(config.tokenUrl, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body,
+    });
+
+    const tokenResponse = await this.readOAuthJsonResponse(response);
+    const accessToken = this.getRequiredString(tokenResponse, 'access_token');
+    const refreshToken = this.getOptionalString(tokenResponse, 'refresh_token');
+    const scopes = this.validateOAuthScopes(config, this.getOptionalString(tokenResponse, 'scope'));
+    const expiresInSeconds = this.getOptionalNumber(tokenResponse, 'expires_in');
+
+    return {
+      accessToken,
+      refreshToken,
+      expiresAt: expiresInSeconds ? new Date(Date.now() + expiresInSeconds * 1000) : null,
+      scopes,
+    };
+  }
+
+  private async fetchOAuthProviderAccount(
+    provider: OAuthProvider,
+    accessToken: string,
+  ): Promise<OAuthProviderAccount> {
+    const profileUrl =
+      provider === GOOGLE_OAUTH_PROVIDER ? GOOGLE_OAUTH_PROFILE_URL : MICROSOFT_OAUTH_PROFILE_URL;
+    const response = await fetch(profileUrl, {
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+      },
+    });
+
+    const profile = await this.readOAuthJsonResponse(response);
+    const providerAccountId =
+      provider === GOOGLE_OAUTH_PROVIDER
+        ? this.getRequiredString(profile, 'sub')
+        : this.getRequiredString(profile, 'id');
+
+    return {
+      providerAccountId,
+    };
+  }
+
+  private async storeOAuthAccount(
+    userId: string,
+    provider: OAuthProvider,
+    providerAccount: OAuthProviderAccount,
+    tokenSet: OAuthTokenSet,
+  ): Promise<void> {
+    const encryptedRefreshToken = tokenSet.refreshToken
+      ? this.cryptoService.encrypt(tokenSet.refreshToken)
+      : null;
+    const encryptedTokenData = {
+      encryptedAccessToken: this.cryptoService.encrypt(tokenSet.accessToken),
+      encryptedRefreshToken,
+      expiresAt: tokenSet.expiresAt,
+      scopes: tokenSet.scopes,
+    };
+    const encryptedTokenUpdateData: Prisma.OAuthAccountUpdateInput = {
+      encryptedAccessToken: encryptedTokenData.encryptedAccessToken,
+      expiresAt: encryptedTokenData.expiresAt,
+      scopes: encryptedTokenData.scopes,
+      ...(encryptedRefreshToken ? { encryptedRefreshToken } : {}),
+    };
+
+    const existingAccount = await this.prisma.oAuthAccount.findUnique({
+      where: {
+        provider_providerAccountId: {
+          provider,
+          providerAccountId: providerAccount.providerAccountId,
+        },
+      },
+      select: {
+        id: true,
+        userId: true,
+        encryptedRefreshToken: true,
+      },
+    });
+
+    if (existingAccount) {
+      if (existingAccount.userId !== userId) {
+        throw new ConflictException('OAuth provider account is already connected');
+      }
+
+      if (!encryptedRefreshToken && !existingAccount.encryptedRefreshToken) {
+        throw new UnauthorizedException('OAuth provider connection failed');
+      }
+
+      await this.prisma.oAuthAccount.update({
+        where: { id: existingAccount.id },
+        data: encryptedTokenUpdateData,
+        select: { id: true },
+      });
+
+      return;
+    }
+
+    if (!encryptedRefreshToken) {
+      throw new UnauthorizedException('OAuth provider connection failed');
+    }
+
+    try {
+      await this.prisma.oAuthAccount.create({
+        data: {
+          userId,
+          provider,
+          providerAccountId: providerAccount.providerAccountId,
+          ...encryptedTokenData,
+        },
+        select: { id: true },
+      });
+    } catch (error: unknown) {
+      if (!isUniqueConstraintError(error)) {
+        throw error;
+      }
+
+      await this.updateOAuthAccountAfterUniqueRace(
+        userId,
+        provider,
+        providerAccount,
+        encryptedTokenUpdateData,
+        encryptedRefreshToken !== null,
+      );
+    }
+  }
+
+  private async updateOAuthAccountAfterUniqueRace(
+    userId: string,
+    provider: OAuthProvider,
+    providerAccount: OAuthProviderAccount,
+    encryptedTokenData: Prisma.OAuthAccountUpdateInput,
+    hasNewRefreshToken: boolean,
+  ): Promise<void> {
+    const existingAccount = await this.prisma.oAuthAccount.findUnique({
+      where: {
+        provider_providerAccountId: {
+          provider,
+          providerAccountId: providerAccount.providerAccountId,
+        },
+      },
+      select: {
+        id: true,
+        userId: true,
+        encryptedRefreshToken: true,
+      },
+    });
+
+    if (!existingAccount || existingAccount.userId !== userId) {
+      throw new ConflictException('OAuth provider account is already connected');
+    }
+
+    if (!hasNewRefreshToken && !existingAccount.encryptedRefreshToken) {
+      throw new UnauthorizedException('OAuth provider connection failed');
+    }
+
+    await this.prisma.oAuthAccount.update({
+      where: { id: existingAccount.id },
+      data: encryptedTokenData,
+      select: { id: true },
+    });
+  }
+
+  private async readOAuthJsonResponse(response: Response): Promise<Record<string, unknown>> {
+    if (!response.ok) {
+      throw new UnauthorizedException('OAuth provider connection failed');
+    }
+
+    const body: unknown = await response.json();
+
+    if (!isRecord(body)) {
+      throw new UnauthorizedException('OAuth provider connection failed');
+    }
+
+    return body;
+  }
+
+  private getRequiredString(source: Record<string, unknown>, key: string): string {
+    const value = source[key];
+
+    if (!isString(value)) {
+      throw new UnauthorizedException('OAuth provider connection failed');
+    }
+
+    return value;
+  }
+
+  private getOptionalString(source: Record<string, unknown>, key: string): string | null {
+    const value = source[key];
+
+    return isString(value) ? value : null;
+  }
+
+  private validateOAuthScopes(config: OAuthProviderConfig, scopes: string | null): string | null {
+    if (!scopes) {
+      return null;
+    }
+
+    const grantedScopes = scopes
+      .trim()
+      .split(/\s+/)
+      .filter((scope) => scope.length > 0);
+
+    if (grantedScopes.length === 0) {
+      return null;
+    }
+
+    const normalizedScopes = grantedScopes.map((scope) => this.normalizeOAuthScope(config, scope));
+    const allowedScopes = new Set(config.scopes);
+
+    if (normalizedScopes.some((scope) => !allowedScopes.has(scope))) {
+      throw new UnauthorizedException('OAuth provider connection failed');
+    }
+
+    const normalizedScopeSet = new Set(normalizedScopes);
+
+    if (config.requiredScopes.some((scope) => !normalizedScopeSet.has(scope))) {
+      throw new UnauthorizedException('OAuth provider connection failed');
+    }
+
+    return Array.from(new Set(normalizedScopes)).join(' ');
+  }
+
+  private normalizeOAuthScope(config: OAuthProviderConfig, scope: string): string {
+    if (config.provider !== GOOGLE_OAUTH_PROVIDER) {
+      return scope;
+    }
+
+    if (
+      scope === 'https://www.googleapis.com/auth/userinfo.email' &&
+      config.scopes.includes('email')
+    ) {
+      return 'email';
+    }
+
+    if (
+      scope === 'https://www.googleapis.com/auth/userinfo.profile' &&
+      config.scopes.includes('profile')
+    ) {
+      return 'profile';
+    }
+
+    return scope;
+  }
+
+  private getOptionalNumber(source: Record<string, unknown>, key: string): number | null {
+    const value = source[key];
+
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+      return value;
+    }
+
+    if (typeof value === 'string') {
+      const parsedValue = Number(value);
+
+      return Number.isFinite(parsedValue) && parsedValue > 0 ? parsedValue : null;
+    }
+
+    return null;
   }
 
   private assertPasswordWithinBcryptLimit(password: string): void {

@@ -6,6 +6,7 @@ import {
   HttpCode,
   HttpStatus,
   Post,
+  Query,
   Res,
   UnauthorizedException,
   UseGuards,
@@ -19,6 +20,7 @@ import {
   AuthService,
   CompletedLoginResult,
   LoginResult,
+  OAuthConnectionResult,
   REFRESH_TOKEN_COOKIE_NAME,
   RefreshCookieOptions,
   SafeUserPayload,
@@ -43,6 +45,10 @@ import { JwtRefreshGuard } from './guards/jwt-refresh.guard';
 type CookieResponse = {
   cookie: (name: string, value: string, options: RefreshCookieOptions) => void;
   clearCookie: (name: string, options: Omit<RefreshCookieOptions, 'maxAge'>) => void;
+};
+
+type RedirectResponse = {
+  redirect: (url: string) => void;
 };
 
 type LoginResponse = AccessTokenResponse & {
@@ -93,6 +99,50 @@ export class AuthController {
       accessToken: result.accessToken,
       user: result.user,
     };
+  }
+
+  @Get('google')
+  @UseGuards(ThrottlerGuard, JwtAuthGuard)
+  @Throttle({ default: AUTH_THROTTLE_LIMITS.oauthStart })
+  async connectGoogle(
+    @CurrentUser() user: AuthenticatedAuthUser,
+    @Res() response: RedirectResponse,
+  ): Promise<void> {
+    const authorizationUrl = await this.authService.createOAuthAuthorizationUrl(user, 'google');
+    response.redirect(authorizationUrl);
+  }
+
+  @Get('google/callback')
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ default: AUTH_THROTTLE_LIMITS.oauthCallback })
+  async connectGoogleCallback(
+    @Query('code') code: string | undefined,
+    @Query('state') state: string | undefined,
+    @Query('error') error: string | undefined,
+  ): Promise<OAuthConnectionResult> {
+    return this.authService.connectOAuthProvider('google', code, state, error);
+  }
+
+  @Get('microsoft')
+  @UseGuards(ThrottlerGuard, JwtAuthGuard)
+  @Throttle({ default: AUTH_THROTTLE_LIMITS.oauthStart })
+  async connectMicrosoft(
+    @CurrentUser() user: AuthenticatedAuthUser,
+    @Res() response: RedirectResponse,
+  ): Promise<void> {
+    const authorizationUrl = await this.authService.createOAuthAuthorizationUrl(user, 'microsoft');
+    response.redirect(authorizationUrl);
+  }
+
+  @Get('microsoft/callback')
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ default: AUTH_THROTTLE_LIMITS.oauthCallback })
+  async connectMicrosoftCallback(
+    @Query('code') code: string | undefined,
+    @Query('state') state: string | undefined,
+    @Query('error') error: string | undefined,
+  ): Promise<OAuthConnectionResult> {
+    return this.authService.connectOAuthProvider('microsoft', code, state, error);
   }
 
   @Post('2fa/generate')
