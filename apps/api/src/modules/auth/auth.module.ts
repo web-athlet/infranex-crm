@@ -4,6 +4,7 @@ import { PassportModule } from '@nestjs/passport';
 import { ThrottlerModule } from '@nestjs/throttler';
 
 import { AUTH_THROTTLE_LIMITS } from './auth-throttle.config';
+import { AuthAuditService } from './auth-audit.service';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { CryptoService } from './crypto.service';
@@ -19,7 +20,15 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     ThrottlerModule.forRoot([AUTH_THROTTLE_LIMITS.default]),
   ],
   controllers: [AuthController],
-  providers: [AuthService, CryptoService, MailService, JwtStrategy, JwtAuthGuard, JwtRefreshGuard],
+  providers: [
+    AuthService,
+    AuthAuditService,
+    CryptoService,
+    MailService,
+    JwtStrategy,
+    JwtAuthGuard,
+    JwtRefreshGuard,
+  ],
   exports: [AuthService, CryptoService, JwtAuthGuard, JwtRefreshGuard],
 })
 export class AuthModule {}
