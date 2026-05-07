@@ -45,4 +45,12 @@ export const AUTH_THROTTLE_LIMITS = {
     limit: 10,
     ttl: AUTH_THROTTLE_TTL_MS,
   },
+  oauthStart: {
+    limit: 10,
+    ttl: AUTH_THROTTLE_TTL_MS,
+  },
+  oauthCallback: {
+    limit: 30,
+    ttl: AUTH_THROTTLE_TTL_MS,
+  },
 } as const;
