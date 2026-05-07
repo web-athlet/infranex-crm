@@ -8,6 +8,8 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import {
+  AuthAuditEventType,
+  AuthAuditOutcome,
   MembershipRole,
   PlatformRole,
   Prisma,
@@ -20,6 +22,7 @@ import { generateSecret, generateURI, verify } from 'otplib';
 import QRCode from 'qrcode';
 
 import { getJwtAccessSecret } from './auth.config';
+import { AuthAuditContext, AuthAuditMetadataValue, AuthAuditService } from './auth-audit.service';
 import { CryptoService } from './crypto.service';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
@@ -199,6 +202,7 @@ type RotationResult =
     }
   | {
       status: 'invalid';
+      reason?: 'policy_blocked';
     }
   | {
       status: 'replay';
@@ -240,6 +244,8 @@ type RefreshTokenMaterial = {
 type RefreshTokenFamilyCreateOptions = {
   secondFactorSatisfiedAt?: Date | null;
 };
+
+type AuthAuditMetadata = Record<string, AuthAuditMetadataValue | undefined>;
 
 type TwoFactorUserState = SafeUserSource & {
   passwordChangedAt: Date | null;
@@ -403,6 +409,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     private readonly jwtService: JwtService,
     private readonly mailService: MailService,
     private readonly cryptoService: CryptoService,
+    private readonly authAuditService: AuthAuditService,
   ) {
     void this.cryptoService;
   }
@@ -508,10 +515,19 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async login(dto: LoginDto): Promise<LoginResult> {
+  async login(dto: LoginDto, auditContext?: AuthAuditContext): Promise<LoginResult> {
     const email = normalizeEmail(dto.email);
 
     if (!isBcryptPasswordInputLengthValid(dto.password)) {
+      this.auditAuthEvent(
+        {
+          email,
+          eventType: AuthAuditEventType.LOGIN_FAILED,
+          outcome: AuthAuditOutcome.FAILURE,
+          metadata: { reason: 'invalid_credentials' },
+        },
+        auditContext,
+      );
       throw new UnauthorizedException('Invalid email or password');
     }
 
@@ -526,12 +542,31 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     });
 
     if (!user || user.deletedAt) {
+      this.auditAuthEvent(
+        {
+          email,
+          eventType: AuthAuditEventType.LOGIN_FAILED,
+          outcome: AuthAuditOutcome.FAILURE,
+          metadata: { reason: 'invalid_credentials' },
+        },
+        auditContext,
+      );
       throw new UnauthorizedException('Invalid email or password');
     }
 
     const passwordMatches = await bcrypt.compare(dto.password, user.passwordHash);
 
     if (!passwordMatches) {
+      this.auditAuthEvent(
+        {
+          userId: user.id,
+          email,
+          eventType: AuthAuditEventType.LOGIN_FAILED,
+          outcome: AuthAuditOutcome.FAILURE,
+          metadata: { reason: 'invalid_credentials' },
+        },
+        auditContext,
+      );
       throw new UnauthorizedException('Invalid email or password');
     }
 
@@ -552,12 +587,31 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       });
 
       if (!lockedUser || lockedUser.deletedAt) {
+        this.auditAuthEvent(
+          {
+            email,
+            eventType: AuthAuditEventType.LOGIN_FAILED,
+            outcome: AuthAuditOutcome.FAILURE,
+            metadata: { reason: 'invalid_credentials' },
+          },
+          auditContext,
+        );
         throw new UnauthorizedException('Invalid email or password');
       }
 
       const lockedPasswordMatches = await bcrypt.compare(dto.password, lockedUser.passwordHash);
 
       if (!lockedPasswordMatches) {
+        this.auditAuthEvent(
+          {
+            userId: lockedUser.id,
+            email,
+            eventType: AuthAuditEventType.LOGIN_FAILED,
+            outcome: AuthAuditOutcome.FAILURE,
+            metadata: { reason: 'invalid_credentials' },
+          },
+          auditContext,
+        );
         throw new UnauthorizedException('Invalid email or password');
       }
 
@@ -634,6 +688,17 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     });
 
     if (loginSession.status === 'twoFactorSetupRequired') {
+      this.auditAuthEvent(
+        {
+          userId: loginSession.authenticatedUser.id,
+          email: loginSession.authenticatedUser.email,
+          eventType: AuthAuditEventType.ADMIN_2FA_BLOCKED,
+          outcome: AuthAuditOutcome.BLOCKED,
+          metadata: { reason: 'two_factor_setup_required', role: PlatformRole.PLATFORM_ADMIN },
+        },
+        auditContext,
+      );
+
       return {
         requiresTwoFactorSetup: true,
         setupToken: await this.signTwoFactorChallengeToken(
@@ -656,6 +721,15 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     }
 
     const accessToken = await this.signAccessToken(loginSession.authenticatedUser);
+    this.auditAuthEvent(
+      {
+        userId: loginSession.authenticatedUser.id,
+        email: loginSession.authenticatedUser.email,
+        eventType: AuthAuditEventType.LOGIN_SUCCESS,
+        outcome: AuthAuditOutcome.SUCCESS,
+      },
+      auditContext,
+    );
 
     return {
       accessToken,
@@ -664,13 +738,15 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  async forgotPassword(dto: ForgotPasswordDto): Promise<void> {
+  async forgotPassword(dto: ForgotPasswordDto, auditContext?: AuthAuditContext): Promise<void> {
     const startedAt = Date.now();
+    const email = normalizeEmail(dto.email);
+    let auditOutcome: AuthAuditOutcome = AuthAuditOutcome.SUCCESS;
+    let auditReason: string | undefined;
 
     try {
       this.mailService.assertPasswordResetEmailAvailable();
 
-      const email = normalizeEmail(dto.email);
       const tokenParts = createPasswordResetTokenParts();
       const tokenHash = await bcrypt.hash(tokenParts.verifier, REFRESH_TOKEN_SALT_ROUNDS);
       const now = new Date();
@@ -715,12 +791,25 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
         email: user.email,
         token: serializePasswordResetToken(tokenParts),
       });
+    } catch (error: unknown) {
+      auditOutcome = AuthAuditOutcome.FAILURE;
+      auditReason = 'request_failed';
+      throw error;
     } finally {
       await this.waitForForgotPasswordTimingFloor(startedAt);
+      this.auditAuthEvent(
+        {
+          email,
+          eventType: AuthAuditEventType.PASSWORD_RESET_REQUESTED,
+          outcome: auditOutcome,
+          metadata: { reason: auditReason },
+        },
+        auditContext,
+      );
     }
   }
 
-  async resetPassword(dto: ResetPasswordDto): Promise<void> {
+  async resetPassword(dto: ResetPasswordDto, auditContext?: AuthAuditContext): Promise<void> {
     this.assertPasswordWithinBcryptLimit(dto.newPassword);
 
     const parsedToken = parsePasswordResetToken(dto.token);
@@ -799,11 +888,21 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
         now,
       );
     });
+
+    this.auditAuthEvent(
+      {
+        userId: passwordReset.userId,
+        eventType: AuthAuditEventType.PASSWORD_RESET_COMPLETED,
+        outcome: AuthAuditOutcome.SUCCESS,
+      },
+      auditContext,
+    );
   }
 
   async changePassword(
     user: AuthenticatedAuthUser,
     dto: ChangePasswordDto,
+    auditContext?: AuthAuditContext,
   ): Promise<AccessTokenResponse> {
     this.assertPasswordWithinBcryptLimit(dto.newPassword);
 
@@ -875,6 +974,16 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     // Change-password is access-token authenticated, so the current refresh
     // token identity is not available safely here. Revoke all sessions and
     // return a fresh short-lived access token.
+    this.auditAuthEvent(
+      {
+        userId: updatedUser.id,
+        email: updatedUser.email,
+        eventType: AuthAuditEventType.PASSWORD_CHANGED,
+        outcome: AuthAuditOutcome.SUCCESS,
+      },
+      auditContext,
+    );
+
     return {
       accessToken: await this.signAccessToken({
         ...this.toSafeUser(updatedUser),
@@ -886,6 +995,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   async generateTwoFactorSetup(
     authorizationHeader: string | undefined,
     dto: TwoFactorGenerateDto,
+    auditContext?: AuthAuditContext,
   ): Promise<TwoFactorSetupResponse> {
     const identity = await this.authenticateTwoFactorSetupIdentity(
       authorizationHeader,
@@ -957,6 +1067,15 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       period: TOTP_STEP_SECONDS,
     });
     const qrCode = await QRCode.toDataURL(otpauthUrl, { type: 'image/png' });
+    this.auditAuthEvent(
+      {
+        userId: lockedUser.id,
+        email: lockedUser.email,
+        eventType: AuthAuditEventType.TWO_FACTOR_SETUP_STARTED,
+        outcome: AuthAuditOutcome.SUCCESS,
+      },
+      auditContext,
+    );
 
     return {
       qrCode,
@@ -967,6 +1086,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   async verifyTwoFactorSetup(
     authorizationHeader: string | undefined,
     dto: TwoFactorVerifyDto,
+    auditContext?: AuthAuditContext,
   ): Promise<TwoFactorVerifyResponse> {
     const identity = await this.authenticateTwoFactorSetupIdentity(
       authorizationHeader,
@@ -1038,85 +1158,150 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       await this.invalidateActiveRefreshTokenFamiliesForUserInTransaction(tx, currentUser.id, now);
     });
 
+    this.auditAuthEvent(
+      {
+        userId: identity.user.id,
+        email: identity.user.email,
+        eventType: AuthAuditEventType.TWO_FACTOR_ENABLED,
+        outcome: AuthAuditOutcome.SUCCESS,
+      },
+      auditContext,
+    );
+
     return {
       success: true,
       backupCodes,
     };
   }
 
-  async validateTwoFactorLogin(dto: TwoFactorValidateDto): Promise<TwoFactorValidateResult> {
-    const payload = await this.verifyTwoFactorChallengeToken(dto.challengeToken);
+  async validateTwoFactorLogin(
+    dto: TwoFactorValidateDto,
+    auditContext?: AuthAuditContext,
+  ): Promise<TwoFactorValidateResult> {
+    let payload: VerifiedTwoFactorChallengeJwtPayload | null = null;
     const now = new Date();
 
-    const result = await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-      await this.lockUserAuthSessions(tx, payload.sub);
+    try {
+      payload = await this.verifyTwoFactorChallengeToken(dto.challengeToken);
+      const verifiedPayload = payload;
+      const result = await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+        await this.lockUserAuthSessions(tx, verifiedPayload.sub);
 
-      const user = await tx.user.findUnique({
-        where: { id: payload.sub },
-        select: this.twoFactorUserSelect(),
+        const user = await tx.user.findUnique({
+          where: { id: verifiedPayload.sub },
+          select: this.twoFactorUserSelect(),
+        });
+
+        if (
+          !user ||
+          user.deletedAt ||
+          !user.passwordChangedAt ||
+          verifiedPayload.pwChangedAt !== passwordChangedAtClaim(user.passwordChangedAt) ||
+          !user.twoFactorEnabled
+        ) {
+          throw new UnauthorizedException(TWO_FACTOR_INVALID_MESSAGE);
+        }
+
+        await this.assertTwoFactorChallengeActiveInTransaction(tx, verifiedPayload, '2fa', now);
+
+        const encryptedSecret = await this.ensureEncryptedTwoFactorSecretInTransaction(tx, user);
+        const secondFactor = await this.verifySecondFactor(
+          { ...user, twoFactorSecretEncrypted: encryptedSecret },
+          dto.code,
+        );
+
+        if (!secondFactor.valid) {
+          throw new UnauthorizedException(TWO_FACTOR_INVALID_MESSAGE);
+        }
+
+        await this.consumeTwoFactorChallengeInTransaction(tx, verifiedPayload, '2fa', now);
+
+        await tx.user.update({
+          where: { id: user.id },
+          data: {
+            twoFactorLastValidatedAt: now,
+            lastLoginAt: now,
+            ...(secondFactor.remainingBackupCodeHashes
+              ? { twoFactorBackupCodesHash: secondFactor.remainingBackupCodeHashes }
+              : {}),
+          },
+          select: { id: true },
+        });
+
+        const refreshTokenMaterial = await this.createRefreshTokenMaterial();
+        const authenticatedUser: TokenReadyAuthUser = {
+          ...this.toSafeUser(user),
+          passwordChangedAt: user.passwordChangedAt,
+        };
+        await this.createRefreshTokenInTransaction(tx, authenticatedUser, refreshTokenMaterial, {
+          secondFactorSatisfiedAt: now,
+        });
+
+        return {
+          authenticatedUser,
+          refreshToken: this.serializeRefreshTokenCookieValue(
+            refreshTokenMaterial.tokenId,
+            refreshTokenMaterial.rawSecret,
+          ),
+          backupCodeUsed: secondFactor.remainingBackupCodeHashes !== null,
+        };
       });
 
-      if (
-        !user ||
-        user.deletedAt ||
-        !user.passwordChangedAt ||
-        payload.pwChangedAt !== passwordChangedAtClaim(user.passwordChangedAt) ||
-        !user.twoFactorEnabled
-      ) {
-        throw new UnauthorizedException(TWO_FACTOR_INVALID_MESSAGE);
-      }
-
-      await this.assertTwoFactorChallengeActiveInTransaction(tx, payload, '2fa', now);
-
-      const encryptedSecret = await this.ensureEncryptedTwoFactorSecretInTransaction(tx, user);
-      const secondFactor = await this.verifySecondFactor(
-        { ...user, twoFactorSecretEncrypted: encryptedSecret },
-        dto.code,
+      this.auditAuthEvent(
+        {
+          userId: result.authenticatedUser.id,
+          email: result.authenticatedUser.email,
+          eventType: AuthAuditEventType.TWO_FACTOR_VALIDATE_SUCCESS,
+          outcome: AuthAuditOutcome.SUCCESS,
+        },
+        auditContext,
       );
 
-      if (!secondFactor.valid) {
-        throw new UnauthorizedException(TWO_FACTOR_INVALID_MESSAGE);
+      this.auditAuthEvent(
+        {
+          userId: result.authenticatedUser.id,
+          email: result.authenticatedUser.email,
+          eventType: AuthAuditEventType.LOGIN_SUCCESS,
+          outcome: AuthAuditOutcome.SUCCESS,
+        },
+        auditContext,
+      );
+
+      if (result.backupCodeUsed) {
+        this.auditAuthEvent(
+          {
+            userId: result.authenticatedUser.id,
+            email: result.authenticatedUser.email,
+            eventType: AuthAuditEventType.BACKUP_CODE_USED,
+            outcome: AuthAuditOutcome.SUCCESS,
+          },
+          auditContext,
+        );
       }
 
-      await this.consumeTwoFactorChallengeInTransaction(tx, payload, '2fa', now);
-
-      await tx.user.update({
-        where: { id: user.id },
-        data: {
-          twoFactorLastValidatedAt: now,
-          lastLoginAt: now,
-          ...(secondFactor.remainingBackupCodeHashes
-            ? { twoFactorBackupCodesHash: secondFactor.remainingBackupCodeHashes }
-            : {}),
-        },
-        select: { id: true },
-      });
-
-      const refreshTokenMaterial = await this.createRefreshTokenMaterial();
-      const authenticatedUser: TokenReadyAuthUser = {
-        ...this.toSafeUser(user),
-        passwordChangedAt: user.passwordChangedAt,
-      };
-      await this.createRefreshTokenInTransaction(tx, authenticatedUser, refreshTokenMaterial, {
-        secondFactorSatisfiedAt: now,
-      });
-
       return {
-        authenticatedUser,
-        refreshToken: this.serializeRefreshTokenCookieValue(
-          refreshTokenMaterial.tokenId,
-          refreshTokenMaterial.rawSecret,
-        ),
+        accessToken: await this.signAccessToken(result.authenticatedUser),
+        refreshToken: result.refreshToken,
       };
-    });
-
-    return {
-      accessToken: await this.signAccessToken(result.authenticatedUser),
-      refreshToken: result.refreshToken,
-    };
+    } catch (error: unknown) {
+      this.auditAuthEvent(
+        {
+          userId: payload?.sub,
+          eventType: AuthAuditEventType.TWO_FACTOR_VALIDATE_FAILED,
+          outcome: AuthAuditOutcome.FAILURE,
+          metadata: { reason: 'invalid_code' },
+        },
+        auditContext,
+      );
+      throw error;
+    }
   }
 
-  async disableTwoFactor(user: AuthenticatedAuthUser, dto: TwoFactorDisableDto): Promise<void> {
+  async disableTwoFactor(
+    user: AuthenticatedAuthUser,
+    dto: TwoFactorDisableDto,
+    auditContext?: AuthAuditContext,
+  ): Promise<void> {
     if (!isBcryptPasswordInputLengthValid(dto.password)) {
       throw new UnauthorizedException('Invalid credentials');
     }
@@ -1173,11 +1358,22 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
 
       await this.invalidateActiveRefreshTokenFamiliesForUserInTransaction(tx, currentUser.id, now);
     });
+
+    this.auditAuthEvent(
+      {
+        userId: user.id,
+        email: user.email,
+        eventType: AuthAuditEventType.TWO_FACTOR_DISABLED,
+        outcome: AuthAuditOutcome.SUCCESS,
+      },
+      auditContext,
+    );
   }
 
   async createOAuthAuthorizationUrl(
     user: AuthenticatedAuthUser,
     provider: OAuthProvider,
+    auditContext?: AuthAuditContext,
   ): Promise<string> {
     const config = this.getOAuthProviderConfig(provider);
     const rawState = randomBytes(OAUTH_STATE_BYTES).toString('base64url');
@@ -1204,6 +1400,17 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       authorizationUrl.searchParams.set(name, value);
     }
 
+    this.auditAuthEvent(
+      {
+        userId: user.id,
+        email: user.email,
+        eventType: AuthAuditEventType.OAUTH_LINK_STARTED,
+        outcome: AuthAuditOutcome.SUCCESS,
+        metadata: { provider },
+      },
+      auditContext,
+    );
+
     return authorizationUrl.toString();
   }
 
@@ -1212,32 +1419,67 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     code: string | undefined,
     state: string | undefined,
     providerError: string | undefined,
+    auditContext?: AuthAuditContext,
   ): Promise<OAuthConnectionResult> {
+    let stateUserId: string | undefined;
+    let failureAudited = false;
+
     if (!isString(state)) {
+      this.auditOAuthLinkFailed(provider, auditContext, { reason: 'missing_state' });
       throw new BadRequestException('Invalid OAuth callback');
     }
 
-    const stateRecord = await this.consumeOAuthState(provider, state);
+    try {
+      const stateRecord = await this.consumeOAuthState(provider, state);
+      stateUserId = stateRecord.userId;
 
-    if (isString(providerError) || !isString(code)) {
-      throw new BadRequestException('Invalid OAuth callback');
+      if (isString(providerError) || !isString(code)) {
+        failureAudited = true;
+        this.auditOAuthLinkFailed(provider, auditContext, {
+          userId: stateUserId,
+          reason: isString(providerError) ? 'provider_error' : 'missing_code',
+        });
+        throw new BadRequestException('Invalid OAuth callback');
+      }
+
+      const config = this.getOAuthProviderConfig(provider);
+      const tokenSet = await this.exchangeOAuthCode(config, code);
+      const providerAccount = await this.fetchOAuthProviderAccount(provider, tokenSet.accessToken);
+
+      await this.storeOAuthAccount(stateRecord.userId, provider, providerAccount, tokenSet);
+      this.auditAuthEvent(
+        {
+          userId: stateRecord.userId,
+          eventType: AuthAuditEventType.OAUTH_LINK_SUCCESS,
+          outcome: AuthAuditOutcome.SUCCESS,
+          metadata: {
+            provider,
+            scopeCount: this.countOAuthScopes(tokenSet.scopes),
+          },
+        },
+        auditContext,
+      );
+
+      return {
+        success: true,
+        provider,
+      };
+    } catch (error: unknown) {
+      if (!failureAudited) {
+        this.auditOAuthLinkFailed(provider, auditContext, {
+          userId: stateUserId,
+          reason: 'connection_failed',
+        });
+      }
+
+      throw error;
     }
-
-    const config = this.getOAuthProviderConfig(provider);
-    const tokenSet = await this.exchangeOAuthCode(config, code);
-    const providerAccount = await this.fetchOAuthProviderAccount(provider, tokenSet.accessToken);
-
-    await this.storeOAuthAccount(stateRecord.userId, provider, providerAccount, tokenSet);
-
-    return {
-      success: true,
-      provider,
-    };
   }
 
   async refresh(
     user: AuthenticatedAuthUser,
     rawRefreshToken: string,
+    auditContext?: AuthAuditContext,
   ): Promise<CompletedLoginResult> {
     const existingToken = await this.findStoredRefreshToken(user.id, rawRefreshToken);
 
@@ -1247,7 +1489,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
 
     if (existingToken.revokedAt) {
       await this.compromiseRefreshTokenFamily(existingToken.familyId);
-      this.recordRefreshReplayDetected(user.id, existingToken.familyId);
+      this.recordRefreshReplayDetected(user.id, existingToken.familyId, auditContext);
       throw new UnauthorizedException('Invalid refresh token');
     }
 
@@ -1256,8 +1498,21 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     }
 
     const authenticatedUser = await this.ensurePasswordChangedAt(user);
-    const replacement = await this.rotateRefreshToken(authenticatedUser, existingToken);
+    const replacement = await this.rotateRefreshToken(
+      authenticatedUser,
+      existingToken,
+      auditContext,
+    );
     const accessToken = await this.signAccessToken(authenticatedUser);
+    this.auditAuthEvent(
+      {
+        userId: authenticatedUser.id,
+        email: authenticatedUser.email,
+        eventType: AuthAuditEventType.REFRESH_SUCCESS,
+        outcome: AuthAuditOutcome.SUCCESS,
+      },
+      auditContext,
+    );
 
     return {
       accessToken,
@@ -1266,7 +1521,11 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  async logout(user: AuthenticatedAuthUser, rawRefreshToken: string): Promise<void> {
+  async logout(
+    user: AuthenticatedAuthUser,
+    rawRefreshToken: string,
+    auditContext?: AuthAuditContext,
+  ): Promise<void> {
     const existingToken = await this.findStoredRefreshToken(user.id, rawRefreshToken);
 
     if (!existingToken || existingToken.revokedAt) {
@@ -1281,15 +1540,35 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       },
       select: { id: true },
     });
+
+    this.auditAuthEvent(
+      {
+        userId: user.id,
+        email: user.email,
+        eventType: AuthAuditEventType.LOGOUT,
+        outcome: AuthAuditOutcome.SUCCESS,
+      },
+      auditContext,
+    );
   }
 
-  async logoutAll(user: AuthenticatedAuthUser): Promise<void> {
+  async logoutAll(user: AuthenticatedAuthUser, auditContext?: AuthAuditContext): Promise<void> {
     const now = new Date();
 
     await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       await this.lockUserAuthSessions(tx, user.id);
       await this.invalidateActiveRefreshTokenFamiliesForUserInTransaction(tx, user.id, now);
     });
+
+    this.auditAuthEvent(
+      {
+        userId: user.id,
+        email: user.email,
+        eventType: AuthAuditEventType.LOGOUT_ALL,
+        outcome: AuthAuditOutcome.SUCCESS,
+      },
+      auditContext,
+    );
   }
 
   async validateAccessPayload(payload: JwtPayload): Promise<AuthenticatedAuthUser> {
@@ -1808,6 +2087,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   private async rotateRefreshToken(
     user: AuthenticatedAuthUser,
     existingToken: RefreshTokenRecord,
+    auditContext?: AuthAuditContext,
   ): Promise<string> {
     const now = new Date();
 
@@ -1853,7 +2133,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
         ) {
           await this.invalidateRefreshTokenFamilyInTransaction(tx, family.id, now);
 
-          return { status: 'invalid' } satisfies RotationResult;
+          return { status: 'invalid', reason: 'policy_blocked' } satisfies RotationResult;
         }
 
         const revokedToken = await tx.refreshToken.updateMany({
@@ -1904,11 +2184,24 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     );
 
     if (replacementToken.status === 'replay') {
-      this.recordRefreshReplayDetected(user.id, existingToken.familyId);
+      this.recordRefreshReplayDetected(user.id, existingToken.familyId, auditContext);
       throw new UnauthorizedException('Invalid refresh token');
     }
 
     if (replacementToken.status === 'invalid') {
+      if (replacementToken.reason === 'policy_blocked') {
+        this.auditAuthEvent(
+          {
+            userId: user.id,
+            email: user.email,
+            eventType: AuthAuditEventType.SECURITY_POLICY_BLOCKED,
+            outcome: AuthAuditOutcome.BLOCKED,
+            metadata: { reason: 'refresh_policy_blocked' },
+          },
+          auditContext,
+        );
+      }
+
       throw new UnauthorizedException('Invalid refresh token');
     }
 
@@ -2103,10 +2396,72 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     return `${tokenId}.${rawSecret}`;
   }
 
-  private recordRefreshReplayDetected(userId: string, familyId: string): void {
-    void userId;
+  private recordRefreshReplayDetected(
+    userId: string,
+    familyId: string,
+    auditContext?: AuthAuditContext,
+  ): void {
+    this.auditAuthEvent(
+      {
+        userId,
+        eventType: AuthAuditEventType.REFRESH_REPLAY_DETECTED,
+        outcome: AuthAuditOutcome.BLOCKED,
+        metadata: {
+          reason: 'replay_detected',
+        },
+      },
+      auditContext,
+    );
     void familyId;
-    // Internal hook reserved for future user alerting once notifications exist.
+  }
+
+  private auditAuthEvent(
+    event: {
+      userId?: string;
+      email?: string;
+      eventType: AuthAuditEventType;
+      outcome: AuthAuditOutcome;
+      metadata?: AuthAuditMetadata;
+    },
+    auditContext?: AuthAuditContext,
+  ): void {
+    void this.authAuditService.audit({
+      ...event,
+      ...auditContext,
+    });
+  }
+
+  private auditOAuthLinkFailed(
+    provider: OAuthProvider,
+    auditContext: AuthAuditContext | undefined,
+    options: {
+      userId?: string;
+      reason: string;
+    },
+  ): void {
+    this.auditAuthEvent(
+      {
+        userId: options.userId,
+        eventType: AuthAuditEventType.OAUTH_LINK_FAILED,
+        outcome: AuthAuditOutcome.FAILURE,
+        metadata: {
+          provider,
+          reason: options.reason,
+        },
+      },
+      auditContext,
+    );
+  }
+
+  private countOAuthScopes(scopes: string | null): number {
+    if (!scopes) {
+      return 0;
+    }
+
+    return scopes
+      .trim()
+      .split(/\s+/)
+      .filter((scope) => scope.length > 0).length;
   }
 
   private buildTokenPayload(user: TokenReadyAuthUser): Required<JwtPayload> {

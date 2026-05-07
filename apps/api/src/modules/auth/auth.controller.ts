@@ -7,6 +7,7 @@ import {
   HttpStatus,
   Post,
   Query,
+  Req,
   Res,
   UnauthorizedException,
   UseGuards,
@@ -14,6 +15,7 @@ import {
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 
 import { AUTH_THROTTLE_LIMITS } from './auth-throttle.config';
+import { AuthAuditContext } from './auth-audit.service';
 import {
   AccessTokenResponse,
   AuthenticatedAuthUser,
@@ -68,6 +70,14 @@ type SuccessResponse = {
   success: true;
 };
 
+type AuthHttpRequest = {
+  ip?: string;
+  socket?: {
+    remoteAddress?: string;
+  };
+  headers: Record<string, string | string[] | undefined>;
+};
+
 @Controller('auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
@@ -85,9 +95,10 @@ export class AuthController {
   @Throttle({ default: AUTH_THROTTLE_LIMITS.login })
   async login(
     @Body() dto: LoginDto,
+    @Req() request: AuthHttpRequest,
     @Res({ passthrough: true }) response: CookieResponse,
   ): Promise<LoginControllerResponse> {
-    const result = await this.authService.login(dto);
+    const result = await this.authService.login(dto, this.getAuditContext(request));
 
     if (!this.isCompletedLoginResult(result)) {
       return result;
@@ -106,9 +117,14 @@ export class AuthController {
   @Throttle({ default: AUTH_THROTTLE_LIMITS.oauthStart })
   async connectGoogle(
     @CurrentUser() user: AuthenticatedAuthUser,
+    @Req() request: AuthHttpRequest,
     @Res() response: RedirectResponse,
   ): Promise<void> {
-    const authorizationUrl = await this.authService.createOAuthAuthorizationUrl(user, 'google');
+    const authorizationUrl = await this.authService.createOAuthAuthorizationUrl(
+      user,
+      'google',
+      this.getAuditContext(request),
+    );
     response.redirect(authorizationUrl);
   }
 
@@ -119,8 +135,15 @@ export class AuthController {
     @Query('code') code: string | undefined,
     @Query('state') state: string | undefined,
     @Query('error') error: string | undefined,
+    @Req() request: AuthHttpRequest,
   ): Promise<OAuthConnectionResult> {
-    return this.authService.connectOAuthProvider('google', code, state, error);
+    return this.authService.connectOAuthProvider(
+      'google',
+      code,
+      state,
+      error,
+      this.getAuditContext(request),
+    );
   }
 
   @Get('microsoft')
@@ -128,9 +151,14 @@ export class AuthController {
   @Throttle({ default: AUTH_THROTTLE_LIMITS.oauthStart })
   async connectMicrosoft(
     @CurrentUser() user: AuthenticatedAuthUser,
+    @Req() request: AuthHttpRequest,
     @Res() response: RedirectResponse,
   ): Promise<void> {
-    const authorizationUrl = await this.authService.createOAuthAuthorizationUrl(user, 'microsoft');
+    const authorizationUrl = await this.authService.createOAuthAuthorizationUrl(
+      user,
+      'microsoft',
+      this.getAuditContext(request),
+    );
     response.redirect(authorizationUrl);
   }
 
@@ -141,8 +169,15 @@ export class AuthController {
     @Query('code') code: string | undefined,
     @Query('state') state: string | undefined,
     @Query('error') error: string | undefined,
+    @Req() request: AuthHttpRequest,
   ): Promise<OAuthConnectionResult> {
-    return this.authService.connectOAuthProvider('microsoft', code, state, error);
+    return this.authService.connectOAuthProvider(
+      'microsoft',
+      code,
+      state,
+      error,
+      this.getAuditContext(request),
+    );
   }
 
   @Post('2fa/generate')
@@ -152,8 +187,13 @@ export class AuthController {
   async generateTwoFactorSetup(
     @Body() dto: TwoFactorGenerateDto,
     @Headers('authorization') authorization: string | undefined,
+    @Req() request: AuthHttpRequest,
   ): Promise<TwoFactorSetupResponse> {
-    return this.authService.generateTwoFactorSetup(authorization, dto);
+    return this.authService.generateTwoFactorSetup(
+      authorization,
+      dto,
+      this.getAuditContext(request),
+    );
   }
 
   @Post('2fa/verify')
@@ -163,8 +203,9 @@ export class AuthController {
   async verifyTwoFactorSetup(
     @Body() dto: TwoFactorVerifyDto,
     @Headers('authorization') authorization: string | undefined,
+    @Req() request: AuthHttpRequest,
   ): Promise<TwoFactorVerifyResponse> {
-    return this.authService.verifyTwoFactorSetup(authorization, dto);
+    return this.authService.verifyTwoFactorSetup(authorization, dto, this.getAuditContext(request));
   }
 
   @Post('2fa/validate')
@@ -173,9 +214,13 @@ export class AuthController {
   @Throttle({ default: AUTH_THROTTLE_LIMITS.twoFactorValidate })
   async validateTwoFactorLogin(
     @Body() dto: TwoFactorValidateDto,
+    @Req() request: AuthHttpRequest,
     @Res({ passthrough: true }) response: CookieResponse,
   ): Promise<AccessTokenResponse> {
-    const result = await this.authService.validateTwoFactorLogin(dto);
+    const result = await this.authService.validateTwoFactorLogin(
+      dto,
+      this.getAuditContext(request),
+    );
     this.setRefreshCookie(response, result.refreshToken);
 
     return {
@@ -190,9 +235,10 @@ export class AuthController {
   async disableTwoFactor(
     @CurrentUser() user: AuthenticatedAuthUser,
     @Body() dto: TwoFactorDisableDto,
+    @Req() request: AuthHttpRequest,
     @Res({ passthrough: true }) response: CookieResponse,
   ): Promise<SuccessResponse> {
-    await this.authService.disableTwoFactor(user, dto);
+    await this.authService.disableTwoFactor(user, dto, this.getAuditContext(request));
     this.clearRefreshCookie(response);
 
     return { success: true };
@@ -202,8 +248,11 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @UseGuards(ThrottlerGuard)
   @Throttle({ default: AUTH_THROTTLE_LIMITS.forgotPassword })
-  async forgotPassword(@Body() dto: ForgotPasswordDto): Promise<SuccessResponse> {
-    await this.authService.forgotPassword(dto);
+  async forgotPassword(
+    @Body() dto: ForgotPasswordDto,
+    @Req() request: AuthHttpRequest,
+  ): Promise<SuccessResponse> {
+    await this.authService.forgotPassword(dto, this.getAuditContext(request));
 
     return { success: true };
   }
@@ -212,8 +261,11 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @UseGuards(ThrottlerGuard)
   @Throttle({ default: AUTH_THROTTLE_LIMITS.resetPassword })
-  async resetPassword(@Body() dto: ResetPasswordDto): Promise<SuccessResponse> {
-    await this.authService.resetPassword(dto);
+  async resetPassword(
+    @Body() dto: ResetPasswordDto,
+    @Req() request: AuthHttpRequest,
+  ): Promise<SuccessResponse> {
+    await this.authService.resetPassword(dto, this.getAuditContext(request));
 
     return { success: true };
   }
@@ -225,12 +277,13 @@ export class AuthController {
   async refresh(
     @CurrentUser() user: AuthenticatedAuthUser,
     @CurrentRefreshToken() refreshToken: string,
+    @Req() request: AuthHttpRequest,
     @Res({ passthrough: true }) response: CookieResponse,
   ): Promise<AccessTokenResponse> {
     let result: CompletedLoginResult;
 
     try {
-      result = await this.authService.refresh(user, refreshToken);
+      result = await this.authService.refresh(user, refreshToken, this.getAuditContext(request));
     } catch (error: unknown) {
       if (error instanceof UnauthorizedException) {
         this.clearRefreshCookie(response);
@@ -253,9 +306,10 @@ export class AuthController {
   async changePassword(
     @CurrentUser() user: AuthenticatedAuthUser,
     @Body() dto: ChangePasswordDto,
+    @Req() request: AuthHttpRequest,
     @Res({ passthrough: true }) response: CookieResponse,
   ): Promise<AccessTokenResponse> {
-    const result = await this.authService.changePassword(user, dto);
+    const result = await this.authService.changePassword(user, dto, this.getAuditContext(request));
     this.clearRefreshCookie(response);
 
     return result;
@@ -267,9 +321,10 @@ export class AuthController {
   async logout(
     @CurrentUser() user: AuthenticatedAuthUser,
     @CurrentRefreshToken() refreshToken: string,
+    @Req() request: AuthHttpRequest,
     @Res({ passthrough: true }) response: CookieResponse,
   ): Promise<LogoutResponse> {
-    await this.authService.logout(user, refreshToken);
+    await this.authService.logout(user, refreshToken, this.getAuditContext(request));
     this.clearRefreshCookie(response);
 
     return { success: true };
@@ -280,9 +335,10 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   async logoutAll(
     @CurrentUser() user: AuthenticatedAuthUser,
+    @Req() request: AuthHttpRequest,
     @Res({ passthrough: true }) response: CookieResponse,
   ): Promise<LogoutResponse> {
-    await this.authService.logoutAll(user);
+    await this.authService.logoutAll(user, this.getAuditContext(request));
     this.clearRefreshCookie(response);
 
     return { success: true };
@@ -311,5 +367,16 @@ export class AuthController {
 
   private isCompletedLoginResult(result: LoginResult): result is CompletedLoginResult {
     return 'refreshToken' in result;
+  }
+
+  private getAuditContext(request: AuthHttpRequest): AuthAuditContext {
+    const userAgentHeader = request.headers['user-agent'];
+    const userAgent = Array.isArray(userAgentHeader) ? userAgentHeader[0] : userAgentHeader;
+    const ipAddress = request.ip ?? request.socket?.remoteAddress;
+
+    return {
+      ...(ipAddress ? { ipAddress } : {}),
+      ...(userAgent ? { userAgent } : {}),
+    };
   }
 }
