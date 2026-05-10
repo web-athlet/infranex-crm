@@ -3,6 +3,8 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { type ReactNode, useState } from 'react';
 
+import { AuthBootstrap } from '@/lib/auth-bootstrap';
+
 type ProvidersProps = {
   children: ReactNode;
 };
@@ -20,5 +22,10 @@ export function Providers({ children }: ProvidersProps) {
       }),
   );
 
-  return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+  return (
+    <QueryClientProvider client={queryClient}>
+      <AuthBootstrap />
+      {children}
+    </QueryClientProvider>
+  );
 }

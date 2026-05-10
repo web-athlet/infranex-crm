@@ -4,6 +4,7 @@ import { getAccessToken } from '@/lib/store/auth-store';
 
 export const api = axios.create({
   baseURL: process.env.NEXT_PUBLIC_API_URL,
+  withCredentials: true,
   headers: {
     'Content-Type': 'application/json',
   },

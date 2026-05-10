@@ -16,7 +16,8 @@ export class MailService {
   async sendPasswordResetEmail(input: PasswordResetEmailInput): Promise<void> {
     this.assertPasswordResetEmailAvailable();
 
-    // Development-only stub: do not log reset tokens in production.
-    console.warn(`DEV ONLY password reset token for ${input.email}: ${input.token}`);
+    void input.email;
+    void input.token;
+    console.warn('Password reset email prepared in non-production mail stub');
   }
 }
