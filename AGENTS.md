@@ -2,7 +2,7 @@
 
 ## Projekt
 
-Wir bauen ein AI-native CRM ähnlich :contentReference[oaicite:0]{index=0}, aber modularer, AI-first und hoch skalierbar.
+Wir bauen ein AI-native CRM, modular, AI-first und hoch skalierbar.
 
 ## Architektur
 
@@ -24,6 +24,7 @@ packages/ui-components → gemeinsame UI-Komponenten
 - shadcn/ui
 - Zustand
 - TanStack Query
+- Custom Auth Client (`apps/web/lib/auth-client.ts`), kein NextAuth.js
 
 ### Backend
 
@@ -92,6 +93,7 @@ Abstufung:
 - Request/Response Types kommen aus Backend DTOs/OpenAPI.
 - Frontend API-Typen werden aus OpenAPI generiert.
 - Keine manuell duplizierten API-Typen in `apps/web`.
+- Bis eine OpenAPI-Generation-Pipeline vorhanden ist, werden rohe API-Antworten im Frontend als `unknown` behandelt und per Runtime-Narrowing in client-interne Shapes überführt.
 - `packages/shared-types` enthält nur stabile, domainübergreifende, nicht-API-spezifische Typen.
 
 ## Package Boundaries
@@ -114,6 +116,11 @@ Abstufung:
 
 ## Auth, RBAC & Multi-Tenancy
 
+- Auth ist bewusst als Custom Auth implementiert; keine NextAuth.js-Implementierung einführen.
+- Neue UI-/API-Flows müssen den bestehenden Auth-Client (`apps/web/lib/auth-client.ts`), Auth-Store (`apps/web/lib/store/auth-store.ts`) und Bootstrap-/Refresh-Mechanismus verwenden.
+- Refresh Tokens bleiben ausschließlich HttpOnly Cookie; niemals in JavaScript lesen oder speichern.
+- Access Tokens bleiben ausschließlich im Memory-State; niemals in `localStorage`, `sessionStorage`, Cookies oder BroadcastChannel persistieren.
+- Auth-/2FA-/Reset-/OAuth-Tokens, Secrets und PII niemals loggen oder über BroadcastChannel senden.
 - Jeder Datenzugriff ist tenant-scoped.
 - `tenantId`/`userId` zentral serverseitig aus Auth ableiten.
 - Niemals ungeprüft Client-Parametern vertrauen.
@@ -136,6 +143,8 @@ Abstufung:
 - Client/UI State über Zustand.
 - API-Daten nicht dauerhaft in Zustand spiegeln.
 - Optimistic Updates nur mit Rollback-Strategie.
+- Access Tokens dürfen nicht persistiert werden.
+- UI-Präferenzen wie Navigation-Expanded-State dürfen in `localStorage` persistiert werden, sofern sie keine sensiblen Daten enthalten.
 
 ## Testing
 
@@ -163,11 +172,16 @@ Abstufung:
 - CSRF/CORS/Cookie-Regeln bei cookie-basierter Auth beachten.
 - File Upload Validation für MinIO.
 - Audit Logs für CRM-kritische Aktionen.
+- Keine Reset Tokens, Access Tokens, Refresh Tokens, Provider Tokens, TOTP Secrets oder Backup Codes loggen.
+- Keine E-Mail-Adressen oder account-identifying PII in Auth-/Reset-/Security-Logs schreiben.
+- Keine Secrets oder Tokens über BroadcastChannel, localStorage, sessionStorage oder URL-Parameter transportieren.
+- Reset-Password-Tokens in URLs nach dem Einlesen clientseitig aus der URL entfernen.
 
 ## Database Rules
 
 - Migrationen immer explizit.
 - Keine destructive migrations ohne Rückfrage.
+- Additive Migrations bevorzugen.
 - Transaktionen bei mehrschrittigen Writes.
 - Indexe bei häufig gefilterten Feldern.
 - `tenantId` Indexe für tenant-bezogene Tabellen.
@@ -210,6 +224,14 @@ Abstufung:
 - Retry-/Backoff-Strategie definieren.
 - Dead-lettered Jobs müssen beobachtbar sein.
 
+## Session Scope Notes
+
+- Session 2 Authentication ist abgeschlossen und nutzt Custom Auth statt NextAuth.js.
+- Zukünftige Sessions dürfen keine NextAuth.js-Abhängigkeit einführen.
+- Session 3 darf nur globale Navigation, Layout, Design-System und UI-State betreffen.
+- Session 3 darf keine Backend-Auth-Änderungen, keine neuen Auth-Flows und keine CRM-Fachmodule implementieren.
+- Ursprüngliche Prompt-Stellen, die NextAuth.js erwähnen, gelten als durch die Custom-Auth-Architektur ersetzt.
+
 ## Scope Control
 
 - Infrastruktur-Komponenten nur einsetzen, wenn der Use Case sie rechtfertigt.
@@ -229,7 +251,7 @@ Immer:
 5. type-check
 6. diff zeigen
 7. review durchführen
-8. Commit vorschlagen (niemals automatisch committen)
+8. Commit vorschlagen, niemals automatisch committen
 
 Regeln:
 
@@ -237,6 +259,8 @@ Regeln:
 - keine halbfertigen Stubs
 - keine TODO-Platzhalter
 - keine unnötigen Extras
+- keine unnötigen Dependency Major Upgrades
+- keine Architekturänderungen ohne explizite Rückfrage
 
 ## Commit Convention
 
@@ -247,6 +271,8 @@ Beispiele:
 - chore(session-0a): root monorepo setup
 - feat(session-0b): web scaffold
 - feat(session-0c): api scaffold + websocket
+- feat(session-2): implement authentication
+- feat(session-3): implement global navigation
 
 ## Regeln für Codex
 
@@ -255,3 +281,6 @@ Beispiele:
 - zuerst denken, dann implementieren
 - Risiken immer explizit nennen
 - Architektur > Geschwindigkeit
+- AGENTS.md strikt befolgen
+- Bei Widerspruch zwischen altem Session-Prompt und aktuellem Repo-Stand gilt der aktuelle Repo-Stand plus AGENTS.md
+- Bei Auth-Fragen gilt immer die Custom-Auth-Architektur aus Session 2
