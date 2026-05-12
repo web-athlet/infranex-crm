@@ -3,6 +3,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { type ReactNode, useState } from 'react';
 
+import { CrmCacheBoundary } from '@/components/providers/crm-cache-boundary';
 import { AuthBootstrap } from '@/lib/auth-bootstrap';
 
 type ProvidersProps = {
@@ -25,6 +26,7 @@ export function Providers({ children }: ProvidersProps) {
   return (
     <QueryClientProvider client={queryClient}>
       <AuthBootstrap />
+      <CrmCacheBoundary />
       {children}
     </QueryClientProvider>
   );
