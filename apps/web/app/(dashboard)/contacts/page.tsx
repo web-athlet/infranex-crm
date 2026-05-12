@@ -1,5 +1,5 @@
-import { DashboardPlaceholder } from '@/components/layout/dashboard-placeholder';
+import { ContactsDashboard } from '@/features/contacts/contacts-dashboard';
 
 export default function ContactsPage() {
-  return <DashboardPlaceholder title="Kontakte" />;
+  return <ContactsDashboard />;
 }

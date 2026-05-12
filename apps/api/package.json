@@ -8,6 +8,7 @@
     "start": "node dist/main.js",
     "lint": "eslint \"src/**/*.ts\"",
     "type-check": "tsc --noEmit -p tsconfig.json",
+    "test": "node --import tsx --test $(find src -name \"*.spec.ts\")",
     "prisma:generate": "prisma generate",
     "prisma:seed": "prisma db seed",
     "prisma:seed:check": "tsc --noEmit --strict --target ES2022 --module CommonJS --moduleResolution Node --lib ES2022 --types node --esModuleInterop --skipLibCheck prisma/seed.ts"
