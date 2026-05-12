@@ -36,6 +36,43 @@ export type ContactRecord = {
   organization: Pick<OrganizationRecord, 'id' | 'name' | 'domain'> | null;
 };
 
+export type DealStatus = 'OPEN' | 'WON' | 'LOST';
+
+export type PipelineStageRecord = {
+  id: string;
+  name: string;
+  position: number;
+  probability: number | null;
+};
+
+export type DealPipelineRecord = {
+  id: string;
+  name: string;
+  stages: PipelineStageRecord[];
+};
+
+export type DealRecord = {
+  id: string;
+  organizationId: string | null;
+  personId: string | null;
+  pipelineId: string;
+  stageId: string;
+  ownerId: string;
+  title: string;
+  description: string | null;
+  value: string | null;
+  currency: string;
+  status: DealStatus;
+  expectedCloseAt: string | null;
+  closedAt: string | null;
+  lostReason: string | null;
+  createdAt: string;
+  updatedAt: string;
+  organization: Pick<OrganizationRecord, 'id' | 'name' | 'domain'> | null;
+  person: Pick<ContactRecord, 'id' | 'firstName' | 'lastName' | 'email'> | null;
+  stage: PipelineStageRecord;
+};
+
 export type OrganizationInput = {
   name: string;
   website?: string | null;
@@ -53,6 +90,19 @@ export type ContactInput = {
   organizationId?: string | null;
   notes?: string | null;
   optIn?: boolean;
+};
+
+export type DealInput = {
+  title: string;
+  description?: string | null;
+  value?: number;
+  currency?: string;
+  status?: DealStatus;
+  stageId?: string;
+  organizationId?: string | null;
+  personId?: string | null;
+  expectedCloseAt?: string | null;
+  lostReason?: string | null;
 };
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -101,6 +151,48 @@ function readBoolean(record: JsonRecord, key: string): boolean {
   }
 
   return value;
+}
+
+function readNullableNumber(record: JsonRecord, key: string): number | null {
+  const value = record[key];
+
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error('Unexpected CRM API response');
+  }
+
+  return value;
+}
+
+function readNullableDecimal(record: JsonRecord, key: string): string | null {
+  const value = record[key];
+
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(value);
+  }
+
+  if (typeof value === 'string' && value.length > 0) {
+    return value;
+  }
+
+  throw new Error('Unexpected CRM API response');
+}
+
+function readDealStatus(record: JsonRecord, key: string): DealStatus {
+  const value = record[key];
+
+  if (value === 'OPEN' || value === 'WON' || value === 'LOST') {
+    return value;
+  }
+
+  throw new Error('Unexpected CRM API response');
 }
 
 function parseOrganization(value: unknown): OrganizationRecord {
@@ -158,6 +250,92 @@ function parseContact(value: unknown): ContactRecord {
     createdAt: readString(value, 'createdAt'),
     updatedAt: readString(value, 'updatedAt'),
     organization: parseContactOrganization(value.organization),
+  };
+}
+
+function parseDealOrganization(value: unknown): DealRecord['organization'] {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  if (!isRecord(value)) {
+    throw new Error('Unexpected CRM API response');
+  }
+
+  return {
+    id: readString(value, 'id'),
+    name: readString(value, 'name'),
+    domain: readNullableString(value, 'domain'),
+  };
+}
+
+function parseDealPerson(value: unknown): DealRecord['person'] {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  if (!isRecord(value)) {
+    throw new Error('Unexpected CRM API response');
+  }
+
+  return {
+    id: readString(value, 'id'),
+    firstName: readString(value, 'firstName'),
+    lastName: readString(value, 'lastName'),
+    email: readNullableString(value, 'email'),
+  };
+}
+
+function parsePipelineStage(value: unknown): PipelineStageRecord {
+  if (!isRecord(value)) {
+    throw new Error('Unexpected CRM API response');
+  }
+
+  return {
+    id: readString(value, 'id'),
+    name: readString(value, 'name'),
+    position: readNumber(value, 'position'),
+    probability: readNullableNumber(value, 'probability'),
+  };
+}
+
+function parseDealPipeline(value: unknown): DealPipelineRecord {
+  if (!isRecord(value) || !Array.isArray(value.stages)) {
+    throw new Error('Unexpected CRM API response');
+  }
+
+  return {
+    id: readString(value, 'id'),
+    name: readString(value, 'name'),
+    stages: value.stages.map(parsePipelineStage),
+  };
+}
+
+function parseDeal(value: unknown): DealRecord {
+  if (!isRecord(value)) {
+    throw new Error('Unexpected CRM API response');
+  }
+
+  return {
+    id: readString(value, 'id'),
+    organizationId: readNullableString(value, 'organizationId'),
+    personId: readNullableString(value, 'personId'),
+    pipelineId: readString(value, 'pipelineId'),
+    stageId: readString(value, 'stageId'),
+    ownerId: readString(value, 'ownerId'),
+    title: readString(value, 'title'),
+    description: readNullableString(value, 'description'),
+    value: readNullableDecimal(value, 'value'),
+    currency: readString(value, 'currency'),
+    status: readDealStatus(value, 'status'),
+    expectedCloseAt: readNullableString(value, 'expectedCloseAt'),
+    closedAt: readNullableString(value, 'closedAt'),
+    lostReason: readNullableString(value, 'lostReason'),
+    createdAt: readString(value, 'createdAt'),
+    updatedAt: readString(value, 'updatedAt'),
+    organization: parseDealOrganization(value.organization),
+    person: parseDealPerson(value.person),
+    stage: parsePipelineStage(value.stage),
   };
 }
 
@@ -254,5 +432,33 @@ export const crmClient = {
 
   async deleteContact(id: string) {
     return parseContact(await deleteUnknown(`/contacts/${id}`));
+  },
+
+  async listDeals(
+    params: {
+      search?: string;
+      page?: number;
+      limit?: number;
+      status?: string;
+      stageId?: string;
+    } = {},
+  ) {
+    return parsePage(await getUnknown(`/deals${queryString(params)}`), parseDeal);
+  },
+
+  async getDealPipeline() {
+    return parseDealPipeline(await getUnknown('/deals/pipeline'));
+  },
+
+  async createDeal(input: DealInput) {
+    return parseDeal(await postUnknown('/deals', input));
+  },
+
+  async updateDeal(id: string, input: DealInput) {
+    return parseDeal(await patchUnknown(`/deals/${id}`, input));
+  },
+
+  async deleteDeal(id: string) {
+    return parseDeal(await deleteUnknown(`/deals/${id}`));
   },
 };

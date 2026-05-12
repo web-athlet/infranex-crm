@@ -1,5 +1,5 @@
-import { DashboardPlaceholder } from '@/components/layout/dashboard-placeholder';
+import { DealsDashboard } from '@/features/deals/deals-dashboard';
 
 export default function DealsPage() {
-  return <DashboardPlaceholder title="Deals" />;
+  return <DealsDashboard />;
 }
