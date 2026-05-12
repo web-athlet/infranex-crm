@@ -1,5 +1,5 @@
-import { DashboardPlaceholder } from '@/components/layout/dashboard-placeholder';
+import { ActivitiesDashboard } from '@/features/activities/activities-dashboard';
 
 export default function ActivitiesPage() {
-  return <DashboardPlaceholder title="Aktivitäten" />;
+  return <ActivitiesDashboard />;
 }
