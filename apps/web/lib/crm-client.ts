@@ -115,6 +115,90 @@ export type NoteRecord = {
   activity: Pick<ActivityRecord, 'id' | 'subject' | 'type'> | null;
 };
 
+export type MoneyAmountRecord = {
+  currency: string;
+  value: string;
+};
+
+export type DashboardStageGroupRecord = {
+  stageId: string;
+  stageName: string | null;
+  stagePosition: number | null;
+  count: number;
+  totalValueByCurrency: MoneyAmountRecord[];
+};
+
+export type DashboardStatusGroupRecord = {
+  status: DealStatus;
+  count: number;
+  totalValueByCurrency: MoneyAmountRecord[];
+};
+
+export type DashboardRecentDealRecord = {
+  id: string;
+  title: string;
+  value: string;
+  currency: string;
+  status: DealStatus;
+  updatedAt: string;
+  organization: Pick<OrganizationRecord, 'id' | 'name' | 'domain'> | null;
+  person: Pick<ContactRecord, 'id' | 'firstName' | 'lastName' | 'email'> | null;
+  stage: Pick<PipelineStageRecord, 'id' | 'name' | 'position'> | null;
+};
+
+export type DashboardRecentActivityRecord = {
+  id: string;
+  type: ActivityType;
+  priority: Priority;
+  subject: string;
+  dueAt: string | null;
+  completedAt: string | null;
+  updatedAt: string;
+  organization: Pick<OrganizationRecord, 'id' | 'name' | 'domain'> | null;
+  person: Pick<ContactRecord, 'id' | 'firstName' | 'lastName' | 'email'> | null;
+  deal: Pick<DealRecord, 'id' | 'title'> | null;
+};
+
+export type DashboardRecentNoteRecord = {
+  id: string;
+  type: string;
+  title: string | null;
+  contentSnippet: string;
+  updatedAt: string;
+  organization: Pick<OrganizationRecord, 'id' | 'name' | 'domain'> | null;
+  person: Pick<ContactRecord, 'id' | 'firstName' | 'lastName' | 'email'> | null;
+  deal: Pick<DealRecord, 'id' | 'title'> | null;
+  activity: Pick<ActivityRecord, 'id' | 'subject' | 'type'> | null;
+};
+
+export type DashboardOverviewRecord = {
+  summary: {
+    activeContactsCount: number;
+    activeOrganizationsCount: number;
+    activeDealsCount: number;
+    notesCount: number;
+    openActivitiesCount: number;
+    completedActivitiesCount: number;
+    overdueActivitiesCount: number;
+    dueTodayActivitiesCount: number;
+    upcomingActivitiesCount: number;
+    openDealsCount: number;
+    wonDealsCount: number;
+    lostDealsCount: number;
+  };
+  pipeline: {
+    openPipelineValueByCurrency: MoneyAmountRecord[];
+    wonDealValueByCurrency: MoneyAmountRecord[];
+    dealsByStatus: DashboardStatusGroupRecord[];
+    dealsByStage: DashboardStageGroupRecord[];
+  };
+  recent: {
+    deals: DashboardRecentDealRecord[];
+    activities: DashboardRecentActivityRecord[];
+    notes: DashboardRecentNoteRecord[];
+  };
+};
+
 export type OrganizationInput = {
   name: string;
   website?: string | null;
@@ -589,6 +673,175 @@ function parseNote(value: unknown): NoteRecord {
   };
 }
 
+function parseMoneyAmount(value: unknown): MoneyAmountRecord {
+  if (!isRecord(value)) {
+    throw new Error('Unexpected CRM API response');
+  }
+
+  return {
+    currency: readString(value, 'currency'),
+    value: readString(value, 'value'),
+  };
+}
+
+function readMoneyAmounts(record: JsonRecord, key: string): MoneyAmountRecord[] {
+  const value = record[key];
+
+  if (!Array.isArray(value)) {
+    throw new Error('Unexpected CRM API response');
+  }
+
+  return value.map(parseMoneyAmount);
+}
+
+function parseDashboardStatusGroup(value: unknown): DashboardStatusGroupRecord {
+  if (!isRecord(value)) {
+    throw new Error('Unexpected CRM API response');
+  }
+
+  return {
+    status: readDealStatus(value, 'status'),
+    count: readNumber(value, 'count'),
+    totalValueByCurrency: readMoneyAmounts(value, 'totalValueByCurrency'),
+  };
+}
+
+function parseDashboardStageGroup(value: unknown): DashboardStageGroupRecord {
+  if (!isRecord(value)) {
+    throw new Error('Unexpected CRM API response');
+  }
+
+  return {
+    stageId: readString(value, 'stageId'),
+    stageName: readNullableString(value, 'stageName'),
+    stagePosition: readNullableNumber(value, 'stagePosition'),
+    count: readNumber(value, 'count'),
+    totalValueByCurrency: readMoneyAmounts(value, 'totalValueByCurrency'),
+  };
+}
+
+function parseDashboardRecentStage(value: unknown): DashboardRecentDealRecord['stage'] {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  if (!isRecord(value)) {
+    throw new Error('Unexpected CRM API response');
+  }
+
+  return {
+    id: readString(value, 'id'),
+    name: readString(value, 'name'),
+    position: readNumber(value, 'position'),
+  };
+}
+
+function parseDashboardRecentDeal(value: unknown): DashboardRecentDealRecord {
+  if (!isRecord(value)) {
+    throw new Error('Unexpected CRM API response');
+  }
+
+  return {
+    id: readString(value, 'id'),
+    title: readString(value, 'title'),
+    value: readString(value, 'value'),
+    currency: readString(value, 'currency'),
+    status: readDealStatus(value, 'status'),
+    updatedAt: readString(value, 'updatedAt'),
+    organization: parseDealOrganization(value.organization),
+    person: parseDealPerson(value.person),
+    stage: parseDashboardRecentStage(value.stage),
+  };
+}
+
+function parseDashboardRecentActivity(value: unknown): DashboardRecentActivityRecord {
+  if (!isRecord(value)) {
+    throw new Error('Unexpected CRM API response');
+  }
+
+  return {
+    id: readString(value, 'id'),
+    type: readActivityType(value, 'type'),
+    priority: readPriority(value, 'priority'),
+    subject: readString(value, 'subject'),
+    dueAt: readNullableString(value, 'dueAt'),
+    completedAt: readNullableString(value, 'completedAt'),
+    updatedAt: readString(value, 'updatedAt'),
+    organization: parseActivityOrganization(value.organization),
+    person: parseActivityPerson(value.person),
+    deal: parseActivityDeal(value.deal),
+  };
+}
+
+function parseDashboardRecentNote(value: unknown): DashboardRecentNoteRecord {
+  if (!isRecord(value)) {
+    throw new Error('Unexpected CRM API response');
+  }
+
+  return {
+    id: readString(value, 'id'),
+    type: readString(value, 'type'),
+    title: readNullableString(value, 'title'),
+    contentSnippet: readString(value, 'contentSnippet'),
+    updatedAt: readString(value, 'updatedAt'),
+    organization: parseNoteOrganization(value.organization),
+    person: parseNotePerson(value.person),
+    deal: parseNoteDeal(value.deal),
+    activity: parseNoteActivity(value.activity),
+  };
+}
+
+function parseDashboardOverview(value: unknown): DashboardOverviewRecord {
+  if (!isRecord(value)) {
+    throw new Error('Unexpected CRM API response');
+  }
+
+  const summary = value.summary;
+  const pipeline = value.pipeline;
+  const recent = value.recent;
+
+  if (
+    !isRecord(summary) ||
+    !isRecord(pipeline) ||
+    !isRecord(recent) ||
+    !Array.isArray(recent.deals) ||
+    !Array.isArray(recent.activities) ||
+    !Array.isArray(recent.notes) ||
+    !Array.isArray(pipeline.dealsByStatus) ||
+    !Array.isArray(pipeline.dealsByStage)
+  ) {
+    throw new Error('Unexpected CRM API response');
+  }
+
+  return {
+    summary: {
+      activeContactsCount: readNumber(summary, 'activeContactsCount'),
+      activeOrganizationsCount: readNumber(summary, 'activeOrganizationsCount'),
+      activeDealsCount: readNumber(summary, 'activeDealsCount'),
+      notesCount: readNumber(summary, 'notesCount'),
+      openActivitiesCount: readNumber(summary, 'openActivitiesCount'),
+      completedActivitiesCount: readNumber(summary, 'completedActivitiesCount'),
+      overdueActivitiesCount: readNumber(summary, 'overdueActivitiesCount'),
+      dueTodayActivitiesCount: readNumber(summary, 'dueTodayActivitiesCount'),
+      upcomingActivitiesCount: readNumber(summary, 'upcomingActivitiesCount'),
+      openDealsCount: readNumber(summary, 'openDealsCount'),
+      wonDealsCount: readNumber(summary, 'wonDealsCount'),
+      lostDealsCount: readNumber(summary, 'lostDealsCount'),
+    },
+    pipeline: {
+      openPipelineValueByCurrency: readMoneyAmounts(pipeline, 'openPipelineValueByCurrency'),
+      wonDealValueByCurrency: readMoneyAmounts(pipeline, 'wonDealValueByCurrency'),
+      dealsByStatus: pipeline.dealsByStatus.map(parseDashboardStatusGroup),
+      dealsByStage: pipeline.dealsByStage.map(parseDashboardStageGroup),
+    },
+    recent: {
+      deals: recent.deals.map(parseDashboardRecentDeal),
+      activities: recent.activities.map(parseDashboardRecentActivity),
+      notes: recent.notes.map(parseDashboardRecentNote),
+    },
+  };
+}
+
 function parsePage<T>(value: unknown, parseItem: (item: unknown) => T): PageResult<T> {
   if (!isRecord(value) || !Array.isArray(value.items)) {
     throw new Error('Unexpected CRM API response');
@@ -645,6 +898,10 @@ async function deleteUnknown(path: string): Promise<unknown> {
 }
 
 export const crmClient = {
+  async getDashboardOverview() {
+    return parseDashboardOverview(await getUnknown('/dashboard/overview'));
+  },
+
   async listOrganizations(params: { search?: string; page?: number; limit?: number } = {}) {
     return parsePage(await getUnknown(`/organizations${queryString(params)}`), parseOrganization);
   },
