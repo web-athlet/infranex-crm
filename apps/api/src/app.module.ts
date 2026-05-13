@@ -11,6 +11,7 @@ import { DealsModule } from './modules/deals/deals.module';
 import { EmailsModule } from './modules/emails/emails.module';
 import { InsightsModule } from './modules/insights/insights.module';
 import { LeadsModule } from './modules/leads/leads.module';
+import { NotesModule } from './modules/notes/notes.module';
 import { OrganizationsModule } from './modules/organizations/organizations.module';
 import { ProductsModule } from './modules/products/products.module';
 import { ProjectsModule } from './modules/projects/projects.module';
@@ -29,6 +30,7 @@ import { WebsocketModule } from './websocket/websocket.module';
     ContactsModule,
     OrganizationsModule,
     ActivitiesModule,
+    NotesModule,
     EmailsModule,
     LeadsModule,
     ProductsModule,

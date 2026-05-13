@@ -41,6 +41,7 @@ export type ActivityType = 'CALL' | 'EMAIL' | 'MEETING' | 'TASK' | 'NOTE';
 export type Priority = 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
 export type ActivityCompletionFilter = 'OPEN' | 'COMPLETED';
 export type ActivityDueFilter = 'OVERDUE' | 'TODAY' | 'UPCOMING' | 'NO_DUE_DATE';
+export type NoteType = 'NOTE' | 'COMMENT';
 
 export type PipelineStageRecord = {
   id: string;
@@ -96,6 +97,24 @@ export type ActivityRecord = {
   deal: Pick<DealRecord, 'id' | 'title'> | null;
 };
 
+export type NoteRecord = {
+  id: string;
+  organizationId: string | null;
+  personId: string | null;
+  dealId: string | null;
+  activityId: string | null;
+  authorId: string;
+  type: string;
+  title: string | null;
+  content: string;
+  createdAt: string;
+  updatedAt: string;
+  organization: Pick<OrganizationRecord, 'id' | 'name' | 'domain'> | null;
+  person: Pick<ContactRecord, 'id' | 'firstName' | 'lastName' | 'email'> | null;
+  deal: Pick<DealRecord, 'id' | 'title'> | null;
+  activity: Pick<ActivityRecord, 'id' | 'subject' | 'type'> | null;
+};
+
 export type OrganizationInput = {
   name: string;
   website?: string | null;
@@ -137,6 +156,16 @@ export type ActivityInput = {
   organizationId?: string | null;
   personId?: string | null;
   dealId?: string | null;
+};
+
+export type NoteInput = {
+  title?: string | null;
+  content: string;
+  type?: string;
+  organizationId?: string | null;
+  personId?: string | null;
+  dealId?: string | null;
+  activityId?: string | null;
 };
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -472,6 +501,94 @@ function parseActivity(value: unknown): ActivityRecord {
   };
 }
 
+function parseNoteOrganization(value: unknown): NoteRecord['organization'] {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  if (!isRecord(value)) {
+    throw new Error('Unexpected CRM API response');
+  }
+
+  return {
+    id: readString(value, 'id'),
+    name: readString(value, 'name'),
+    domain: readNullableString(value, 'domain'),
+  };
+}
+
+function parseNotePerson(value: unknown): NoteRecord['person'] {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  if (!isRecord(value)) {
+    throw new Error('Unexpected CRM API response');
+  }
+
+  return {
+    id: readString(value, 'id'),
+    firstName: readString(value, 'firstName'),
+    lastName: readString(value, 'lastName'),
+    email: readNullableString(value, 'email'),
+  };
+}
+
+function parseNoteDeal(value: unknown): NoteRecord['deal'] {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  if (!isRecord(value)) {
+    throw new Error('Unexpected CRM API response');
+  }
+
+  return {
+    id: readString(value, 'id'),
+    title: readString(value, 'title'),
+  };
+}
+
+function parseNoteActivity(value: unknown): NoteRecord['activity'] {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  if (!isRecord(value)) {
+    throw new Error('Unexpected CRM API response');
+  }
+
+  return {
+    id: readString(value, 'id'),
+    subject: readString(value, 'subject'),
+    type: readActivityType(value, 'type'),
+  };
+}
+
+function parseNote(value: unknown): NoteRecord {
+  if (!isRecord(value)) {
+    throw new Error('Unexpected CRM API response');
+  }
+
+  return {
+    id: readString(value, 'id'),
+    organizationId: readNullableString(value, 'organizationId'),
+    personId: readNullableString(value, 'personId'),
+    dealId: readNullableString(value, 'dealId'),
+    activityId: readNullableString(value, 'activityId'),
+    authorId: readString(value, 'authorId'),
+    type: readString(value, 'type'),
+    title: readNullableString(value, 'title'),
+    content: readString(value, 'content'),
+    createdAt: readString(value, 'createdAt'),
+    updatedAt: readString(value, 'updatedAt'),
+    organization: parseNoteOrganization(value.organization),
+    person: parseNotePerson(value.person),
+    deal: parseNoteDeal(value.deal),
+    activity: parseNoteActivity(value.activity),
+  };
+}
+
 function parsePage<T>(value: unknown, parseItem: (item: unknown) => T): PageResult<T> {
   if (!isRecord(value) || !Array.isArray(value.items)) {
     throw new Error('Unexpected CRM API response');
@@ -630,5 +747,32 @@ export const crmClient = {
 
   async deleteActivity(id: string) {
     return parseActivity(await deleteUnknown(`/activities/${id}`));
+  },
+
+  async listNotes(
+    params: {
+      search?: string;
+      page?: number;
+      limit?: number;
+      type?: string;
+      organizationId?: string;
+      personId?: string;
+      dealId?: string;
+      activityId?: string;
+    } = {},
+  ) {
+    return parsePage(await getUnknown(`/notes${queryString(params)}`), parseNote);
+  },
+
+  async createNote(input: NoteInput) {
+    return parseNote(await postUnknown('/notes', input));
+  },
+
+  async updateNote(id: string, input: NoteInput) {
+    return parseNote(await patchUnknown(`/notes/${id}`, input));
+  },
+
+  async deleteNote(id: string) {
+    return parseNote(await deleteUnknown(`/notes/${id}`));
   },
 };
