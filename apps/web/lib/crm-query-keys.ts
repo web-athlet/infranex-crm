@@ -32,4 +32,22 @@ export const crmQueryKeys = {
     ] as const,
   activityLookups: (userId: string | null) =>
     [...crmQueryKeys.all, userId, 'activities', 'lookups'] as const,
+  notes: (
+    userId: string | null,
+    search: string,
+    page: number,
+    type: string,
+    organizationId: string,
+    personId: string,
+    dealId: string,
+    activityId: string,
+  ) =>
+    [
+      ...crmQueryKeys.all,
+      userId,
+      'notes',
+      { search, page, type, organizationId, personId, dealId, activityId },
+    ] as const,
+  noteLookups: (userId: string | null, search: string, page: number, limit: number) =>
+    [...crmQueryKeys.all, userId, 'notes', 'lookups', { search, page, limit }] as const,
 };

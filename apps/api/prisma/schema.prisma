@@ -160,6 +160,7 @@ model Tenant {
 
   memberships      Membership[]
   auditLogs        AuditLog[]
+  notes            Note[]
   organizations    Organization[]
   people           Person[]
   pipelines        Pipeline[]
@@ -182,22 +183,22 @@ model Tenant {
 }
 
 model User {
-  id                String       @id @default(cuid())
-  email             String       @unique
-  passwordHash      String
-  name              String?
-  passwordChangedAt DateTime?
-  twoFactorSecret   String?
-  twoFactorEnabled  Boolean      @default(false)
-  twoFactorSecretEncrypted  String?
-  twoFactorEnabledAt        DateTime?
-  twoFactorBackupCodesHash  Json?
-  twoFactorLastValidatedAt  DateTime?
-  platformRole      PlatformRole @default(USER)
-  lastLoginAt       DateTime?
-  createdAt         DateTime     @default(now())
-  updatedAt         DateTime     @updatedAt
-  deletedAt         DateTime?
+  id                       String       @id @default(cuid())
+  email                    String       @unique
+  passwordHash             String
+  name                     String?
+  passwordChangedAt        DateTime?
+  twoFactorSecret          String?
+  twoFactorEnabled         Boolean      @default(false)
+  twoFactorSecretEncrypted String?
+  twoFactorEnabledAt       DateTime?
+  twoFactorBackupCodesHash Json?
+  twoFactorLastValidatedAt DateTime?
+  platformRole             PlatformRole @default(USER)
+  lastLoginAt              DateTime?
+  createdAt                DateTime     @default(now())
+  updatedAt                DateTime     @updatedAt
+  deletedAt                DateTime?
 
   memberships          Membership[]
   refreshTokens        RefreshToken[]
@@ -246,6 +247,7 @@ model Membership {
 
   ownedDeals      Deal[]     @relation("DealOwner")
   ownedActivities Activity[] @relation("ActivityOwner")
+  authoredNotes   Note[]     @relation("NoteAuthor")
   ownedTasks      Task[]     @relation("TaskOwner")
 
   @@unique([tenantId, userId])
@@ -400,14 +402,15 @@ model Organization {
   updatedAt           DateTime               @updatedAt
   deletedAt           DateTime?
 
-  tenant     Tenant      @relation(fields: [tenantId], references: [id])
-  people     Person[]
-  deals      Deal[]
-  activities Activity[]
-  emails     Email[]
-  leads      Lead[]
-  projects   Project[]
-  aiInsights AIInsight[]
+  tenant      Tenant      @relation(fields: [tenantId], references: [id])
+  people      Person[]
+  deals       Deal[]
+  activities  Activity[]
+  noteEntries Note[]
+  emails      Email[]
+  leads       Lead[]
+  projects    Project[]
+  aiInsights  AIInsight[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, domain])
@@ -436,6 +439,7 @@ model Person {
   organization     Organization?     @relation(fields: [tenantId, organizationId], references: [tenantId, id])
   deals            Deal[]
   activities       Activity[]
+  noteEntries      Note[]
   emails           Email[]
   leads            Lead[]
   campaignContacts CampaignContact[]
@@ -515,6 +519,7 @@ model Deal {
   stage        Stage         @relation(fields: [tenantId, pipelineId, stageId], references: [tenantId, pipelineId, id])
   owner        Membership    @relation("DealOwner", fields: [tenantId, ownerId], references: [tenantId, id])
   activities   Activity[]
+  notes        Note[]
   emails       Email[]
   dealProducts DealProduct[]
   projects     Project[]
@@ -551,7 +556,9 @@ model Activity {
   person       Person?       @relation(fields: [tenantId, personId], references: [tenantId, id])
   deal         Deal?         @relation(fields: [tenantId, dealId], references: [tenantId, id])
   owner        Membership?   @relation("ActivityOwner", fields: [tenantId, ownerId], references: [tenantId, id])
+  notes        Note[]
 
+  @@unique([tenantId, id])
   @@index([tenantId, deletedAt])
   @@index([tenantId, organizationId])
   @@index([tenantId, personId])
@@ -559,6 +566,39 @@ model Activity {
   @@index([tenantId, ownerId])
   @@index([tenantId, dueAt])
   @@index([tenantId, completedAt])
+}
+
+model Note {
+  id             String    @id @default(cuid())
+  tenantId       String
+  organizationId String?
+  personId       String?
+  dealId         String?
+  activityId     String?
+  authorId       String
+  type           String    @default("NOTE")
+  title          String?
+  content        String
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id])
+  organization Organization? @relation(fields: [tenantId, organizationId], references: [tenantId, id])
+  person       Person?       @relation(fields: [tenantId, personId], references: [tenantId, id])
+  deal         Deal?         @relation(fields: [tenantId, dealId], references: [tenantId, id])
+  activity     Activity?     @relation(fields: [tenantId, activityId], references: [tenantId, id])
+  author       Membership    @relation("NoteAuthor", fields: [tenantId, authorId], references: [tenantId, id])
+
+  @@unique([tenantId, id])
+  @@index([tenantId, deletedAt])
+  @@index([tenantId, organizationId])
+  @@index([tenantId, personId])
+  @@index([tenantId, dealId])
+  @@index([tenantId, activityId])
+  @@index([tenantId, authorId])
+  @@index([tenantId, type])
+  @@index([tenantId, updatedAt])
 }
 
 model Email {

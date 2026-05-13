@@ -12,6 +12,7 @@ export const primaryNavigationItems = [
   { href: '/campaigns', label: 'Campaigns', marker: 'C' },
   { href: '/inbox', label: 'Inbox', marker: 'I' },
   { href: '/activities', label: 'Aktivitäten', marker: 'A' },
+  { href: '/notes', label: 'Notizen', marker: 'N' },
   { href: '/contacts', label: 'Kontakte', marker: 'K' },
   { href: '/insights', label: 'Einblicke', marker: 'E' },
   { href: '/products', label: 'Produkte', marker: 'Pd' },
