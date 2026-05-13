@@ -7,6 +7,7 @@ import { AiModule } from './modules/ai/ai.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { CampaignsModule } from './modules/campaigns/campaigns.module';
 import { ContactsModule } from './modules/contacts/contacts.module';
+import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { DealsModule } from './modules/deals/deals.module';
 import { EmailsModule } from './modules/emails/emails.module';
 import { InsightsModule } from './modules/insights/insights.module';
@@ -26,6 +27,7 @@ import { WebsocketModule } from './websocket/websocket.module';
     AuthSharedModule,
     AuthModule,
     UsersModule,
+    DashboardModule,
     DealsModule,
     ContactsModule,
     OrganizationsModule,

@@ -1,6 +1,8 @@
 export const crmQueryKeys = {
   all: ['crm'] as const,
   user: (userId: string) => [...crmQueryKeys.all, userId] as const,
+  dashboardOverview: (userId: string | null) =>
+    [...crmQueryKeys.all, userId, 'dashboard', 'overview'] as const,
   contacts: (userId: string | null, search: string, page: number) =>
     [...crmQueryKeys.all, userId, 'contacts', { search, page }] as const,
   contactsLookup: (userId: string | null, search: string, page: number, limit: number) =>

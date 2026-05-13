@@ -17,3 +17,5 @@ repository history.
   frontend deals dashboard.
 - [Session 6](./session-6.md): Tenant-scoped activities CRUD, complete/reopen
   behavior, filters, relation linking, and activities dashboard.
+- [Session 8](./session-8.md): Tenant-scoped CRM dashboard metrics overview for
+  the existing dashboard start page.
